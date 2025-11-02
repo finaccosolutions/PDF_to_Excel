@@ -21,14 +21,17 @@ function App() {
     try {
       const result = await processPDF(file);
 
-      if (result.success && result.data) {
+      if (result.success && result.data && result.data.length > 0) {
         setTransactions(result.data);
         setFilename(result.filename);
       } else {
-        setError('Failed to extract transaction data from the PDF');
+        setError(
+          result.error ||
+          'No transactions found in the PDF. Please ensure your PDF contains a valid bank statement with transaction data.'
+        );
       }
-    } catch (err) {
-      setError('An error occurred while processing the PDF. Please try again.');
+    } catch (err: any) {
+      setError(err.message || 'An error occurred while processing the PDF. Please try again.');
       console.error(err);
     } finally {
       setIsProcessing(false);

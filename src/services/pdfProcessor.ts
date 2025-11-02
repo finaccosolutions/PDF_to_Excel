@@ -8,29 +8,38 @@ export async function processPDF(file: File): Promise<ConversionResult> {
 
     const apiUrl = `${import.meta.env.VITE_SUPABASE_URL}/functions/v1/process-pdf`;
 
+    console.log('Sending PDF to:', apiUrl);
+    console.log('File:', file.name, file.size, file.type);
+
     const response = await fetch(apiUrl, {
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${import.meta.env.VITE_SUPABASE_ANON_KEY}`,
-      },
       body: formData,
     });
 
-    if (!response.ok) {
-      throw new Error('Failed to process PDF');
-    }
+    console.log('Response status:', response.status);
+    console.log('Response ok:', response.ok);
 
     const result = await response.json();
+    console.log('Processing result:', result);
 
-    await supabase.from('conversions').insert({
-      original_filename: file.name,
-      extracted_data: result.data,
-      status: 'completed',
-    });
+    if (result.success && result.data && result.data.length > 0) {
+      try {
+        await supabase.from('conversions').insert({
+          original_filename: file.name,
+          extracted_data: result.data,
+          status: 'completed',
+        });
+      } catch (dbError) {
+        console.warn('Database insert warning (not critical):', dbError);
+      }
+    }
 
     return result;
   } catch (error) {
     console.error('Error processing PDF:', error);
-    throw error;
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new Error('Failed to process PDF. Please try again.');
   }
 }
