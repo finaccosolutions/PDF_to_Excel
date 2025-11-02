@@ -62,7 +62,6 @@ interface TextItem {
 
 interface ColumnRange {
   header: string;
-  normalizedHeader: string;
   minX: number;
   maxX: number;
   centerX: number;
@@ -110,8 +109,7 @@ interface ParseResult {
 function parseAllPages(allPagesData: TextItem[][]): ParseResult {
   let allTransactions: Array<{ [key: string]: string }> = [];
   let pages: PageData[] = [];
-  let globalHeaders: string[] = [];
-  let normalizedHeaders: string[] = [];
+  let headers: string[] = [];
   let columnRanges: ColumnRange[] = [];
 
   for (let pageIndex = 0; pageIndex < allPagesData.length; pageIndex++) {
@@ -132,10 +130,9 @@ function parseAllPages(allPagesData: TextItem[][]): ParseResult {
       }
     }
 
-    if (headerRowIndex >= 0 && globalHeaders.length === 0) {
-      globalHeaders = headerRow.map(item => item.text);
-      normalizedHeaders = normalizeHeaders(globalHeaders);
-      columnRanges = calculateColumnRanges(headerRow, normalizedHeaders, rows, headerRowIndex);
+    if (headerRowIndex >= 0 && headers.length === 0) {
+      headers = headerRow.map(item => item.text);
+      columnRanges = calculateColumnRanges(headerRow, headers, rows, headerRowIndex);
     }
 
     const pageTransactions: Array<{ [key: string]: string }> = [];
@@ -145,22 +142,22 @@ function parseAllPages(allPagesData: TextItem[][]): ParseResult {
       const groupedTransactions = groupMultiLineTransactions(
         rows.slice(dataStartIndex),
         columnRanges,
-        normalizedHeaders
+        headers
       );
 
       for (const transaction of groupedTransactions) {
         if (isFooterTransaction(transaction)) break;
-        if (hasValidTransactionData(transaction, normalizedHeaders)) {
+        if (hasValidTransactionData(transaction, headers)) {
           allTransactions.push(transaction);
           pageTransactions.push(transaction);
         }
       }
     } else if (pageIndex > 0 && columnRanges.length > 0) {
-      const groupedTransactions = groupMultiLineTransactions(rows, columnRanges, normalizedHeaders);
+      const groupedTransactions = groupMultiLineTransactions(rows, columnRanges, headers);
 
       for (const transaction of groupedTransactions) {
         if (isHeaderTransaction(transaction) || isFooterTransaction(transaction)) continue;
-        if (hasValidTransactionData(transaction, normalizedHeaders)) {
+        if (hasValidTransactionData(transaction, headers)) {
           allTransactions.push(transaction);
           pageTransactions.push(transaction);
         }
@@ -175,13 +172,9 @@ function parseAllPages(allPagesData: TextItem[][]): ParseResult {
     }
   }
 
-  const finalHeaders = normalizedHeaders.length > 0
-    ? normalizedHeaders
-    : ['Date', 'Particulars', 'Withdrawal', 'Deposit', 'Balance'];
-
   return {
     transactions: allTransactions,
-    headers: finalHeaders,
+    headers: headers,
     pages: pages,
   };
 }
@@ -224,7 +217,7 @@ function groupItemsIntoRows(items: TextItem[]): TextItem[][] {
 
 function calculateColumnRanges(
   headerRow: TextItem[],
-  normalizedHeaders: string[],
+  headers: string[],
   allRows: TextItem[][],
   headerRowIndex: number
 ): ColumnRange[] {
@@ -254,9 +247,6 @@ function calculateColumnRanges(
     const current = sortedHeaders[i];
     const next = sortedHeaders[i + 1];
 
-    const headerIndex = headerRow.findIndex(h => h.text === current.text && h.x === current.x);
-    const normalizedHeader = normalizedHeaders[headerIndex] || current.text;
-
     let minX = current.x - 10;
     let maxX: number;
 
@@ -278,7 +268,6 @@ function calculateColumnRanges(
 
     ranges.push({
       header: current.text,
-      normalizedHeader: normalizedHeader,
       minX: minX,
       maxX: maxX,
       centerX: current.x,
@@ -291,10 +280,16 @@ function calculateColumnRanges(
 function groupMultiLineTransactions(
   rows: TextItem[][],
   columnRanges: ColumnRange[],
-  normalizedHeaders: string[]
+  headers: string[]
 ): Array<{ [key: string]: string }> {
   const transactions: Array<{ [key: string]: string }> = [];
   let i = 0;
+
+  const dateHeader = headers.find(h =>
+    h.toLowerCase().includes('date') ||
+    h.toLowerCase() === 'dt' ||
+    h.toLowerCase() === 'txn date'
+  ) || headers[0];
 
   while (i < rows.length) {
     const row = rows[i];
@@ -304,13 +299,16 @@ function groupMultiLineTransactions(
       continue;
     }
 
-    const transaction = mapRowToColumns(row, columnRanges, normalizedHeaders);
+    const transaction = mapRowToColumns(row, columnRanges, headers);
 
-    const hasDate = transaction['Date'] && isValidDate(transaction['Date']);
-    const hasAmount = normalizedHeaders.some(h =>
-      (h.includes('Withdrawal') || h.includes('Deposit') || h.includes('Debit') || h.includes('Credit') || h.includes('Balance')) &&
-      transaction[h] && transaction[h].trim().length > 0
-    );
+    const hasDate = transaction[dateHeader] && isValidDate(transaction[dateHeader]);
+    const hasAmount = headers.some(h => {
+      const lower = h.toLowerCase();
+      return (lower.includes('withdrawal') || lower.includes('deposit') ||
+              lower.includes('debit') || lower.includes('credit') ||
+              lower.includes('balance') || lower.includes('amount')) &&
+             transaction[h] && transaction[h].trim().length > 0;
+    });
 
     if (!hasDate && !hasAmount) {
       i++;
@@ -328,32 +326,35 @@ function groupMultiLineTransactions(
         break;
       }
 
-      const nextTransaction = mapRowToColumns(nextRow, columnRanges, normalizedHeaders);
-      const nextHasDate = nextTransaction['Date'] && isValidDate(nextTransaction['Date']);
+      const nextTransaction = mapRowToColumns(nextRow, columnRanges, headers);
+      const nextHasDate = nextTransaction[dateHeader] && isValidDate(nextTransaction[dateHeader]);
 
-      const nextHasAmount = normalizedHeaders.some(h =>
-        (h.includes('Withdrawal') || h.includes('Deposit') || h.includes('Debit') || h.includes('Credit') || h.includes('Balance')) &&
-        nextTransaction[h] && /\d/.test(nextTransaction[h])
-      );
+      const nextHasAmount = headers.some(h => {
+        const lower = h.toLowerCase();
+        return (lower.includes('withdrawal') || lower.includes('deposit') ||
+                lower.includes('debit') || lower.includes('credit') ||
+                lower.includes('balance')) &&
+               nextTransaction[h] && /\d/.test(nextTransaction[h]);
+      });
 
       if (nextHasDate && nextHasAmount) {
         break;
       }
 
       if (nextHasDate) {
-        const nextRowHasOtherData = normalizedHeaders.some(h =>
-          h !== 'Date' && nextTransaction[h] && nextTransaction[h].trim().length > 0
+        const nextRowHasOtherData = headers.some(h =>
+          h !== dateHeader && nextTransaction[h] && nextTransaction[h].trim().length > 0
         );
         if (nextRowHasOtherData) {
           break;
         }
       }
 
-      const continuationData = mapRowToColumns(nextRow, columnRanges, normalizedHeaders);
+      const continuationData = mapRowToColumns(nextRow, columnRanges, headers);
 
-      normalizedHeaders.forEach(header => {
+      headers.forEach(header => {
         if (continuationData[header] && continuationData[header].trim().length > 0) {
-          const isContinuation = !isValidDate(continuationData[header]) || header !== 'Date';
+          const isContinuation = !isValidDate(continuationData[header]) || header !== dateHeader;
 
           if (isContinuation) {
             if (transaction[header] && transaction[header].trim().length > 0) {
@@ -382,11 +383,11 @@ function groupMultiLineTransactions(
 function mapRowToColumns(
   row: TextItem[],
   columnRanges: ColumnRange[],
-  normalizedHeaders: string[]
+  headers: string[]
 ): { [key: string]: string } {
   const transaction: { [key: string]: string } = {};
 
-  normalizedHeaders.forEach((header) => {
+  headers.forEach((header) => {
     transaction[header] = '';
   });
 
@@ -409,7 +410,7 @@ function mapRowToColumns(
     }
 
     if (bestMatch >= 0) {
-      const header = columnRanges[bestMatch].normalizedHeader;
+      const header = columnRanges[bestMatch].header;
       if (transaction[header]) {
         transaction[header] += ' ' + item.text;
       } else {
@@ -418,7 +419,7 @@ function mapRowToColumns(
     }
   });
 
-  normalizedHeaders.forEach(header => {
+  headers.forEach(header => {
     if (transaction[header]) {
       transaction[header] = transaction[header].trim();
     }
@@ -475,25 +476,27 @@ function isFooterRow(row: TextItem[]): boolean {
 
 function hasValidTransactionData(
   transaction: { [key: string]: string },
-  normalizedHeaders: string[]
+  headers: string[]
 ): boolean {
   const values = Object.values(transaction);
   const nonEmptyCount = values.filter(v => v && v.trim().length > 0).length;
 
   if (nonEmptyCount < 1) return false;
 
-  const hasDate = transaction['Date'] && isValidDate(transaction['Date']);
-
-  const hasAmount = normalizedHeaders.some(h =>
-    (h.includes('Withdrawal') || h.includes('Deposit') || h.includes('Debit') ||
-     h.includes('Credit') || h.includes('Balance') || h.includes('Amount')) &&
-    transaction[h] && transaction[h].trim().length > 0
+  const dateHeader = headers.find(h =>
+    h.toLowerCase().includes('date') ||
+    h.toLowerCase() === 'dt'
   );
 
-  const hasDescription = normalizedHeaders.some(h =>
-    (h.includes('Particulars') || h.includes('Description') || h.includes('Narration') || h.includes('Details')) &&
-    transaction[h] && transaction[h].trim().length > 0
-  );
+  const hasDate = dateHeader && transaction[dateHeader] && isValidDate(transaction[dateHeader]);
+
+  const hasAmount = headers.some(h => {
+    const lower = h.toLowerCase();
+    return (lower.includes('withdrawal') || lower.includes('deposit') ||
+            lower.includes('debit') || lower.includes('credit') ||
+            lower.includes('balance') || lower.includes('amount')) &&
+           transaction[h] && transaction[h].trim().length > 0;
+  });
 
   if (!hasDate && !hasAmount) return false;
 
@@ -536,68 +539,4 @@ function isFooterTransaction(transaction: { [key: string]: string }): boolean {
   ];
 
   return footerKeywords.some(keyword => transactionText.includes(keyword));
-}
-
-function normalizeHeaders(headers: string[]): string[] {
-  const headerMap: { [key: string]: string } = {
-    'date': 'Date',
-    'dt': 'Date',
-    'txn date': 'Date',
-    'transaction date': 'Date',
-    'value date': 'Date',
-    'posting date': 'Date',
-
-    'description': 'Particulars',
-    'particulars': 'Particulars',
-    'narration': 'Particulars',
-    'details': 'Particulars',
-    'transaction details': 'Particulars',
-    'transaction description': 'Particulars',
-
-    'debit': 'Withdrawal',
-    'withdrawal': 'Withdrawal',
-    'dr': 'Withdrawal',
-    'debit amount': 'Withdrawal',
-    'withdrawals': 'Withdrawal',
-
-    'credit': 'Deposit',
-    'deposit': 'Deposit',
-    'cr': 'Deposit',
-    'credit amount': 'Deposit',
-    'deposits': 'Deposit',
-
-    'balance': 'Balance',
-    'closing balance': 'Balance',
-    'available balance': 'Balance',
-    'running balance': 'Balance',
-
-    'amount': 'Amount',
-    'transaction amount': 'Amount',
-
-    'memo': 'Memo',
-    'reference': 'Reference',
-    'ref': 'Reference',
-    'ref no': 'Reference',
-    'reference number': 'Reference',
-
-    'cheque': 'Cheque',
-    'chq': 'Cheque',
-    'cheque no': 'Cheque',
-    'check': 'Cheque',
-  };
-
-  const result: string[] = [];
-  const seen = new Set<string>();
-
-  headers.forEach(header => {
-    const lower = header.toLowerCase().trim();
-    const normalized = headerMap[lower] || header;
-
-    if (!seen.has(normalized)) {
-      seen.add(normalized);
-      result.push(normalized);
-    }
-  });
-
-  return result.length > 0 ? result : ['Date', 'Particulars', 'Withdrawal', 'Deposit', 'Balance'];
 }
