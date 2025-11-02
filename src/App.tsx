@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Header from './components/Header';
 import FileUpload from './components/FileUpload';
 import DataPreview from './components/DataPreview';
@@ -7,6 +7,12 @@ import { processPDF } from './services/pdfProcessor';
 import { Transaction } from './types/transaction';
 import { AlertCircle } from 'lucide-react';
 
+interface SavedSession {
+  transactions: Transaction[];
+  headers: string[];
+  filename: string;
+}
+
 function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
@@ -14,6 +20,20 @@ function App() {
   const [filename, setFilename] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+
+  useEffect(() => {
+    const saved = localStorage.getItem('pdfConversionSession');
+    if (saved) {
+      try {
+        const session: SavedSession = JSON.parse(saved);
+        setTransactions(session.transactions);
+        setHeaders(session.headers);
+        setFilename(session.filename);
+      } catch (e) {
+        console.error('Error loading saved session:', e);
+      }
+    }
+  }, []);
 
   const handleFileSelect = (file: File) => {
     setSelectedFile(file);
@@ -36,6 +56,13 @@ function App() {
         setTransactions(result.data);
         setHeaders(result.headers || []);
         setFilename(result.filename);
+
+        const session: SavedSession = {
+          transactions: result.data,
+          headers: result.headers || [],
+          filename: result.filename,
+        };
+        localStorage.setItem('pdfConversionSession', JSON.stringify(session));
       } else {
         setError(
           result.error ||
@@ -52,6 +79,12 @@ function App() {
 
   const handleDataChange = (newData: Transaction[]) => {
     setTransactions(newData);
+    const session: SavedSession = {
+      transactions: newData,
+      headers: headers,
+      filename: filename,
+    };
+    localStorage.setItem('pdfConversionSession', JSON.stringify(session));
   };
 
   return (

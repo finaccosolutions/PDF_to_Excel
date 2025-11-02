@@ -25,13 +25,13 @@ Deno.serve(async (req: Request) => {
     const arrayBuffer = await file.arrayBuffer();
     const uint8Array = new Uint8Array(arrayBuffer);
 
-    const pdfText = await extractTextFromPDF(uint8Array);
-    const { data, headers } = parseTabularData(pdfText);
+    const pdfData = await extractAllPages(uint8Array);
+    const { transactions, headers } = parseTransactions(pdfData);
 
     return new Response(
       JSON.stringify({
-        success: data.length > 0,
-        data: data,
+        success: transactions.length > 0,
+        data: transactions,
         headers: headers,
         filename: file.name,
       }),
@@ -51,23 +51,33 @@ Deno.serve(async (req: Request) => {
   }
 });
 
-async function extractTextFromPDF(data: Uint8Array): Promise<string> {
+interface TextItem {
+  text: string;
+  y: number;
+  x: number;
+}
+
+async function extractAllPages(data: Uint8Array): Promise<TextItem[][]> {
   try {
     const pdf = await pdfjsLib.getDocument({ data }).promise;
-    const textParts: string[] = [];
+    const allItems: TextItem[][] = [];
 
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
       const page = await pdf.getPage(pageNum);
       const textContent = await page.getTextContent();
 
-      const pageText = textContent.items
-        .map((item: any) => item.str)
-        .join(' ');
+      const pageItems: TextItem[] = textContent.items
+        .filter((item: any) => item.str && item.str.trim())
+        .map((item: any) => ({
+          text: item.str,
+          y: item.transform[5],
+          x: item.transform[4],
+        }));
 
-      textParts.push(pageText);
+      allItems.push(pageItems);
     }
 
-    return textParts.join('\n');
+    return allItems;
   } catch (error) {
     console.error('PDF extraction error:', error);
     throw new Error('Failed to extract text from PDF');
@@ -75,148 +85,172 @@ async function extractTextFromPDF(data: Uint8Array): Promise<string> {
 }
 
 interface ParseResult {
-  data: Array<{ [key: string]: string }>;
+  transactions: Array<{ [key: string]: string }>;
   headers: string[];
 }
 
-function parseTabularData(text: string): ParseResult {
-  const lines = text.split(/\n+/).map(l => l.trim()).filter(l => l.length > 0);
+function parseTransactions(pageItems: TextItem[][]): ParseResult {
+  const allRows = buildRowsFromPages(pageItems);
 
-  let headers: string[] = [];
-  let dataLines: string[] = [];
-  let inDataSection = false;
-  let footerStartIndex = -1;
+  if (allRows.length === 0) {
+    return { transactions: [], headers: [] };
+  }
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
+  let headerRow: string[] = [];
+  let dataStartIndex = 0;
 
-    if (!inDataSection) {
-      if (isHeaderLine(line)) {
-        headers = extractHeaders(line);
-        inDataSection = true;
-        continue;
-      }
-    } else {
-      if (isFooterLine(line)) {
-        footerStartIndex = i;
-        break;
-      }
+  for (let i = 0; i < allRows.length; i++) {
+    const row = allRows[i];
+    if (isHeaderRow(row)) {
+      headerRow = row;
+      dataStartIndex = i + 1;
+      break;
+    }
+  }
 
-      if (isValidDataLine(line, headers)) {
-        dataLines.push(line);
+  if (headerRow.length === 0) {
+    headerRow = ['Date', 'Description', 'Withdrawal', 'Deposit', 'Balance'];
+  }
+
+  const transactions: Array<{ [key: string]: string }> = [];
+
+  for (let i = dataStartIndex; i < allRows.length; i++) {
+    const row = allRows[i];
+
+    if (isFooterRow(row)) break;
+
+    if (isTransactionRow(row, headerRow)) {
+      const transaction = mapRowToTransaction(row, headerRow);
+      if (hasTransactionData(transaction)) {
+        transactions.push(transaction);
       }
     }
   }
 
-  if (headers.length === 0) {
-    headers = detectHeadersFromContent(lines);
-  }
-
-  const transactions = dataLines.map(line => parseDataLine(line, headers));
-
   return {
-    data: transactions.filter(t => Object.values(t).some(v => v && v.length > 0)),
-    headers: headers
+    transactions,
+    headers: normalizeHeaders(headerRow),
   };
 }
 
-function isHeaderLine(line: string): boolean {
-  const lowerLine = line.toLowerCase();
+function buildRowsFromPages(pageItems: TextItem[][]): string[][] {
+  const rows: string[][] = [];
 
-  const headerPatterns = [
-    /date|transaction|debit|credit|description|particulars|amount|balance/i,
-  ];
-
-  const headerIndicators = [
-    'date',
-    'transaction',
-    'debit',
-    'credit',
-    'balance',
-    'amount',
-    'description',
-    'particulars',
-    'withdrawal',
-    'deposit',
-    'opening',
-    'closing',
-    'reference',
-  ];
-
-  const matches = headerIndicators.filter(indicator =>
-    lowerLine.includes(indicator)
-  );
-
-  return matches.length >= 2 && !line.match(/\d{2,4}[-\/]\d{1,2}[-\/]\d{1,2}/);
-}
-
-function extractHeaders(line: string): string[] {
-  const headers = line
-    .split(/\s{2,}/)
-    .map(h => h.trim())
-    .filter(h => h.length > 0 && !h.match(/^\d+$/));
-
-  if (headers.length === 0) {
-    const parts = line.split(/\t+/).map(p => p.trim()).filter(p => p.length > 0);
-    return parts;
+  for (const pageItems_ of pageItems) {
+    const pageRows = buildRowsFromItems(pageItems_);
+    rows.push(...pageRows);
   }
 
-  return headers;
+  return rows;
 }
 
-function isFooterLine(line: string): boolean {
-  const lowerLine = line.toLowerCase();
+function buildRowsFromItems(items: TextItem[]): string[][] {
+  const rowMap = new Map<number, TextItem[]>();
 
-  const footerPatterns = [
-    /^(end of statement|total|grand total|closing balance|statement generated|thank you)/i,
-    /^page \d+ of \d+/i,
-    /bank name|branch|ifsc|micr/i,
-    /^(this is a|please note|for further|thank|regards|signature|terms)/i,
-  ];
-
-  return footerPatterns.some(pattern => pattern.test(lowerLine));
-}
-
-function isValidDataLine(line: string, headers: string[]): boolean {
-  if (line.length < 5) return false;
-
-  const hasDate = /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{2}[\s-]\w{3}[\s-]\d{4}/.test(line);
-  const hasAmount = /\d+(?:[.,]\d{2})?(?:\s|$)/.test(line);
-
-  return hasDate || (hasAmount && line.split(/\s+/).length >= 3);
-}
-
-function detectHeadersFromContent(lines: string[]): string[] {
-  for (let i = 0; i < Math.min(10, lines.length); i++) {
-    const line = lines[i];
-    if (isHeaderLine(line)) {
-      return extractHeaders(line);
+  items.forEach(item => {
+    const rowKey = Math.round(item.y / 2) * 2;
+    if (!rowMap.has(rowKey)) {
+      rowMap.set(rowKey, []);
     }
-  }
-
-  return ['Date', 'Description', 'Amount', 'Balance'];
-}
-
-function parseDataLine(line: string, headers: string[]): { [key: string]: string } {
-  const parts = line
-    .split(/\s{2,}/)
-    .map(p => p.trim())
-    .filter(p => p.length > 0);
-
-  if (parts.length === 0) {
-    const tabParts = line.split(/\t+/).map(p => p.trim()).filter(p => p.length > 0);
-    return mapPartsToHeaders(tabParts, headers);
-  }
-
-  return mapPartsToHeaders(parts, headers);
-}
-
-function mapPartsToHeaders(parts: string[], headers: string[]): { [key: string]: string } {
-  const result: { [key: string]: string } = {};
-
-  headers.forEach((header, index) => {
-    result[header] = parts[index] || '';
+    rowMap.get(rowKey)!.push(item);
   });
 
-  return result;
+  const sortedRows = Array.from(rowMap.entries())
+    .sort((a, b) => b[0] - a[0])
+    .map(([_, items_]) => {
+      return items_
+        .sort((a, b) => a.x - b.x)
+        .map(item => item.text);
+    });
+
+  return sortedRows;
+}
+
+function isHeaderRow(row: string[]): boolean {
+  if (row.length < 2) return false;
+
+  const headerKeywords = [
+    'date', 'description', 'particulars', 'debit', 'credit',
+    'withdrawal', 'deposit', 'balance', 'amount', 'transaction',
+    'reference', 'memo', 'cheque'
+  ];
+
+  const lowerRow = row.map(cell => cell.toLowerCase());
+  const matchCount = lowerRow.filter(cell =>
+    headerKeywords.some(keyword => cell.includes(keyword))
+  ).length;
+
+  const hasNoDate = !lowerRow.some(cell =>
+    /^\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}/.test(cell)
+  );
+
+  return matchCount >= 2 && hasNoDate;
+}
+
+function isFooterRow(row: string[]): boolean {
+  const footerKeywords = [
+    'end of statement', 'closing balance', 'total', 'page',
+    'thank you', 'regards', 'signature', 'generated',
+    'terms and conditions'
+  ];
+
+  const joinedRow = row.join(' ').toLowerCase();
+  return footerKeywords.some(keyword => joinedRow.includes(keyword));
+}
+
+function isTransactionRow(row: string[], headers: string[]): boolean {
+  if (row.length < 2) return false;
+
+  const joinedRow = row.join(' ');
+
+  const hasDate = /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{1,2}\s+\w{3}\s+\d{4}/.test(joinedRow);
+  const hasAmount = /\d+(?:[.,]\d{2})?(?:\s|$)/.test(joinedRow);
+
+  return hasDate && hasAmount;
+}
+
+function mapRowToTransaction(row: string[], headers: string[]): { [key: string]: string } {
+  const transaction: { [key: string]: string } = {};
+
+  headers.forEach((header, index) => {
+    transaction[header] = row[index]?.trim() || '';
+  });
+
+  return transaction;
+}
+
+function hasTransactionData(transaction: { [key: string]: string }): boolean {
+  return Object.values(transaction).some(value => value && value.length > 0);
+}
+
+function normalizeHeaders(headers: string[]): string[] {
+  const normalized: { [key: string]: boolean } = {};
+  const result: string[] = [];
+
+  const headerMap: { [key: string]: string } = {
+    'date': 'Date',
+    'description': 'Description',
+    'particulars': 'Particulars',
+    'debit': 'Withdrawal',
+    'withdrawal': 'Withdrawal',
+    'credit': 'Deposit',
+    'deposit': 'Deposit',
+    'balance': 'Balance',
+    'amount': 'Amount',
+    'memo': 'Description',
+    'reference': 'Reference',
+    'cheque': 'Cheque',
+  };
+
+  headers.forEach(header => {
+    const lower = header.toLowerCase();
+    const normalized_ = headerMap[lower] || header;
+
+    if (!normalized[normalized_]) {
+      normalized[normalized_] = true;
+      result.push(normalized_);
+    }
+  });
+
+  return result.length > 0 ? result : ['Date', 'Description', 'Withdrawal', 'Deposit', 'Balance'];
 }
