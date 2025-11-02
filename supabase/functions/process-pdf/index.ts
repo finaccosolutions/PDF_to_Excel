@@ -223,21 +223,47 @@ function calculateColumnRanges(
 ): ColumnRange[] {
   const sortedHeaders = [...headerRow].sort((a, b) => a.x - b.x);
 
-  const sampleRows = allRows.slice(headerRowIndex + 1, Math.min(headerRowIndex + 20, allRows.length));
+  const sampleRows = allRows.slice(headerRowIndex + 1, Math.min(headerRowIndex + 30, allRows.length));
+
+  const columnXPositions: Map<number, number[]> = new Map();
+
+  for (let colIdx = 0; colIdx < sortedHeaders.length; colIdx++) {
+    columnXPositions.set(colIdx, []);
+  }
+
+  sampleRows.forEach(row => {
+    row.forEach(item => {
+      for (let i = 0; i < sortedHeaders.length; i++) {
+        const headerX = sortedHeaders[i].x;
+        const nextHeaderX = i < sortedHeaders.length - 1 ? sortedHeaders[i + 1].x : Infinity;
+
+        const distanceToCurrent = Math.abs(item.x - headerX);
+        const distanceToNext = i < sortedHeaders.length - 1 ? Math.abs(item.x - nextHeaderX) : Infinity;
+
+        if (distanceToCurrent < distanceToNext && distanceToCurrent < 100) {
+          columnXPositions.get(i)!.push(item.x);
+          break;
+        }
+      }
+    });
+  });
 
   const allXPositions: number[] = [];
   sampleRows.forEach(row => {
     row.forEach(item => {
       allXPositions.push(item.x);
+      if (item.width && item.width > 0) {
+        allXPositions.push(item.x + item.width);
+      }
     });
   });
   allXPositions.sort((a, b) => a - b);
 
-  const xGaps: Array<{ position: number; gap: number }> = [];
+  const columnBoundaries: number[] = [];
   for (let i = 0; i < allXPositions.length - 1; i++) {
     const gap = allXPositions[i + 1] - allXPositions[i];
-    if (gap > 20) {
-      xGaps.push({ position: (allXPositions[i] + allXPositions[i + 1]) / 2, gap });
+    if (gap > 15) {
+      columnBoundaries.push((allXPositions[i] + allXPositions[i + 1]) / 2);
     }
   }
 
@@ -247,21 +273,38 @@ function calculateColumnRanges(
     const current = sortedHeaders[i];
     const next = sortedHeaders[i + 1];
 
-    let minX = current.x - 10;
+    const colData = columnXPositions.get(i) || [];
+    const minDataX = colData.length > 0 ? Math.min(...colData) : current.x;
+    const maxDataX = colData.length > 0 ? Math.max(...colData) : current.x;
+
+    let minX = Math.min(current.x, minDataX) - 5;
     let maxX: number;
 
     if (next) {
       const midpoint = (current.x + next.x) / 2;
 
-      const relevantGaps = xGaps.filter(g =>
-        g.position > current.x && g.position < next.x && g.gap > 30
+      const relevantBoundaries = columnBoundaries.filter(b =>
+        b > current.x && b < next.x
       );
 
-      if (relevantGaps.length > 0) {
-        maxX = relevantGaps[0].position;
+      if (relevantBoundaries.length > 0) {
+        const boundariesWithScores = relevantBoundaries.map(boundary => {
+          const leftDist = boundary - maxDataX;
+          const rightDist = (columnXPositions.get(i + 1) || []).length > 0
+            ? Math.min(...(columnXPositions.get(i + 1)!)) - boundary
+            : Infinity;
+
+          const score = Math.min(leftDist, rightDist);
+          return { boundary, score };
+        });
+
+        boundariesWithScores.sort((a, b) => b.score - a.score);
+        maxX = boundariesWithScores[0].boundary;
       } else {
         maxX = midpoint;
       }
+
+      maxX = Math.max(maxX, maxDataX + 3);
     } else {
       maxX = Infinity;
     }
@@ -391,20 +434,46 @@ function mapRowToColumns(
     transaction[header] = '';
   });
 
-  row.forEach(item => {
+  const sortedRow = [...row].sort((a, b) => a.x - b.x);
+
+  sortedRow.forEach(item => {
     let bestMatch = -1;
     let bestScore = -1;
 
     for (let i = 0; i < columnRanges.length; i++) {
       const range = columnRanges[i];
 
-      if (item.x >= range.minX && item.x < range.maxX) {
+      const itemEndX = item.width && item.width > 0 ? item.x + item.width : item.x + 10;
+
+      const itemInRange = item.x >= range.minX && item.x < range.maxX;
+      const itemOverlaps = item.x < range.maxX && itemEndX > range.minX;
+
+      if (itemInRange || itemOverlaps) {
         const distanceFromCenter = Math.abs(item.x - range.centerX);
-        const score = 1000 - distanceFromCenter;
+
+        const overlapAmount = itemInRange ? 100 :
+          Math.min(itemEndX, range.maxX) - Math.max(item.x, range.minX);
+
+        const score = 2000 - distanceFromCenter + (overlapAmount * 10);
 
         if (score > bestScore) {
           bestScore = score;
           bestMatch = i;
+        }
+      }
+    }
+
+    if (bestMatch === -1) {
+      for (let i = 0; i < columnRanges.length; i++) {
+        const range = columnRanges[i];
+        const distanceFromCenter = Math.abs(item.x - range.centerX);
+
+        if (distanceFromCenter < 100) {
+          const score = 1000 - distanceFromCenter;
+          if (score > bestScore) {
+            bestScore = score;
+            bestMatch = i;
+          }
         }
       }
     }
