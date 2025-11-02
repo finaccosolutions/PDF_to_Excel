@@ -12,14 +12,23 @@ function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [filename, setFilename] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
-  const handleFileSelect = async (file: File) => {
+  const handleFileSelect = (file: File) => {
+    setSelectedFile(file);
+    setTransactions([]);
+    setError(null);
+  };
+
+  const handleConvert = async () => {
+    if (!selectedFile) return;
+
     setIsProcessing(true);
     setError(null);
     setTransactions([]);
 
     try {
-      const result = await processPDF(file);
+      const result = await processPDF(selectedFile);
 
       if (result.success && result.data && result.data.length > 0) {
         setTransactions(result.data);
@@ -50,7 +59,12 @@ function App() {
         <Features />
 
         <div className="mb-12">
-          <FileUpload onFileSelect={handleFileSelect} isProcessing={isProcessing} />
+          <FileUpload
+            onFileSelect={handleFileSelect}
+            isProcessing={isProcessing}
+            selectedFile={selectedFile}
+            onConvert={handleConvert}
+          />
         </div>
 
         {error && (

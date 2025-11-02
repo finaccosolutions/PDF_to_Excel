@@ -21,6 +21,9 @@ export async function processPDF(file: File): Promise<ConversionResult> {
 
     const result = await response.json();
     console.log('Processing result:', result);
+    if (result.debugInfo) {
+      console.log('Debug info:', result.debugInfo);
+    }
 
     if (result.success && result.data && result.data.length > 0) {
       try {

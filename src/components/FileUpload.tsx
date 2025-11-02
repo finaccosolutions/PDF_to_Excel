@@ -4,11 +4,12 @@ import { Upload, FileText, Loader2 } from 'lucide-react';
 interface FileUploadProps {
   onFileSelect: (file: File) => void;
   isProcessing: boolean;
+  selectedFile: File | null;
+  onConvert: () => void;
 }
 
-export default function FileUpload({ onFileSelect, isProcessing }: FileUploadProps) {
+export default function FileUpload({ onFileSelect, isProcessing, selectedFile, onConvert }: FileUploadProps) {
   const [isDragging, setIsDragging] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleDragEnter = (e: React.DragEvent) => {
@@ -35,7 +36,6 @@ export default function FileUpload({ onFileSelect, isProcessing }: FileUploadPro
 
     const files = e.dataTransfer.files;
     if (files.length > 0 && files[0].type === 'application/pdf') {
-      setSelectedFile(files[0]);
       onFileSelect(files[0]);
     }
   };
@@ -43,7 +43,6 @@ export default function FileUpload({ onFileSelect, isProcessing }: FileUploadPro
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files && files.length > 0) {
-      setSelectedFile(files[0]);
       onFileSelect(files[0]);
     }
   };
@@ -53,7 +52,7 @@ export default function FileUpload({ onFileSelect, isProcessing }: FileUploadPro
   };
 
   return (
-    <div className="w-full max-w-2xl mx-auto">
+    <div className="w-full max-w-2xl mx-auto space-y-4">
       <div
         onClick={handleClick}
         onDragEnter={handleDragEnter}
@@ -121,6 +120,17 @@ export default function FileUpload({ onFileSelect, isProcessing }: FileUploadPro
           </div>
         )}
       </div>
+
+      {selectedFile && !isProcessing && (
+        <div className="flex justify-center">
+          <button
+            onClick={onConvert}
+            className="px-8 py-3 bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold rounded-xl hover:from-blue-700 hover:to-indigo-700 transition-all duration-200 transform hover:scale-105 shadow-lg hover:shadow-xl"
+          >
+            Convert to Excel
+          </button>
+        </div>
+      )}
     </div>
   );
 }
