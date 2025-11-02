@@ -235,7 +235,8 @@ function mapRowToColumns(
   columnAssignments.forEach((texts, columnIndex) => {
     const header = headers[columnIndex];
     if (header) {
-      transaction[header] = texts.join(' ');
+      const combinedText = texts.join('');
+      transaction[header] = combinedText;
     }
   });
 
@@ -267,7 +268,8 @@ function isFooterRow(row: TextItem[]): boolean {
   const footerKeywords = [
     'end of statement', 'closing balance', 'total', 'page',
     'thank you', 'regards', 'signature', 'generated',
-    'terms and conditions', 'continued'
+    'terms and conditions', 'continued', 'statement from',
+    'statement period', 'account summary', 'opening balance'
   ];
 
   const joinedText = row.map(item => item.text).join(' ').toLowerCase();
@@ -280,16 +282,41 @@ function isTransactionRow(row: TextItem[]): boolean {
   const joinedText = row.map(item => item.text).join(' ');
 
   const hasDate = /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{1,2}\s+\w{3}\s+\d{4}/.test(joinedText);
-  const hasAmount = /\d+(?:[.,]\d{2})?(?:\s|$)/.test(joinedText);
+  const hasAmount = /\d+[,.]?\d*(?:[.,]\d{2})?(?:\s|$)/.test(joinedText);
 
-  return hasDate && hasAmount;
+  const nonTransactionPatterns = [
+    /statement\s+(from|period|to)/i,
+    /opening\s+balance/i,
+    /closing\s+balance/i,
+    /account\s+(summary|number|name)/i,
+    /customer\s+(id|name)/i,
+    /branch\s+(code|name)/i,
+    /ifsc\s+code/i,
+  ];
+
+  const isNonTransaction = nonTransactionPatterns.some(pattern => pattern.test(joinedText));
+
+  return hasDate && hasAmount && !isNonTransaction;
 }
 
 function hasValidTransactionData(transaction: { [key: string]: string }): boolean {
   const values = Object.values(transaction);
   const nonEmptyCount = values.filter(v => v && v.length > 0).length;
 
-  return nonEmptyCount >= 2;
+  if (nonEmptyCount < 2) return false;
+
+  const transactionText = Object.values(transaction).join(' ').toLowerCase();
+
+  const invalidPatterns = [
+    /statement\s+(from|period|to)/,
+    /opening\s+balance/,
+    /account\s+(summary|number)/,
+    /customer\s+(id|name)/,
+    /branch\s+(code|name)/,
+    /ifsc\s+code/,
+  ];
+
+  return !invalidPatterns.some(pattern => pattern.test(transactionText));
 }
 
 function normalizeHeaders(headers: string[]): string[] {
