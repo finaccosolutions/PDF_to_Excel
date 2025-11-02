@@ -4,11 +4,12 @@ import FileUpload from './components/FileUpload';
 import DataPreview from './components/DataPreview';
 import Features from './components/Features';
 import { processPDF } from './services/pdfProcessor';
-import { Transaction } from './types/transaction';
+import { Transaction, PageData } from './types/transaction';
 import { AlertCircle } from 'lucide-react';
 
 interface SavedSession {
   transactions: Transaction[];
+  pages: PageData[];
   headers: string[];
   filename: string;
 }
@@ -16,6 +17,7 @@ interface SavedSession {
 function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [pages, setPages] = useState<PageData[]>([]);
   const [headers, setHeaders] = useState<string[]>([]);
   const [filename, setFilename] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -27,6 +29,7 @@ function App() {
       try {
         const session: SavedSession = JSON.parse(saved);
         setTransactions(session.transactions);
+        setPages(session.pages || []);
         setHeaders(session.headers);
         setFilename(session.filename);
       } catch (e) {
@@ -38,6 +41,7 @@ function App() {
   const handleFileSelect = (file: File) => {
     setSelectedFile(file);
     setTransactions([]);
+    setPages([]);
     setError(null);
   };
 
@@ -47,6 +51,7 @@ function App() {
     setIsProcessing(true);
     setError(null);
     setTransactions([]);
+    setPages([]);
     setHeaders([]);
 
     try {
@@ -54,11 +59,13 @@ function App() {
 
       if (result.success && result.data && result.data.length > 0) {
         setTransactions(result.data);
+        setPages(result.pages || []);
         setHeaders(result.headers || []);
         setFilename(result.filename);
 
         const session: SavedSession = {
           transactions: result.data,
+          pages: result.pages || [],
           headers: result.headers || [],
           filename: result.filename,
         };
@@ -77,10 +84,12 @@ function App() {
     }
   };
 
-  const handleDataChange = (newData: Transaction[]) => {
+  const handleDataChange = (newData: Transaction[], newPages: PageData[]) => {
     setTransactions(newData);
+    setPages(newPages);
     const session: SavedSession = {
       transactions: newData,
+      pages: newPages,
       headers: headers,
       filename: filename,
     };
@@ -117,6 +126,7 @@ function App() {
           <div className="animate-fadeIn">
             <DataPreview
               data={transactions}
+              pages={pages}
               filename={filename}
               onDataChange={handleDataChange}
               headers={headers}

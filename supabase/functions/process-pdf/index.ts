@@ -17,7 +17,7 @@ Deno.serve(async (req: Request) => {
 
     if (!file) {
       return new Response(
-        JSON.stringify({ error: "No file provided", success: false, data: [], headers: [] }),
+        JSON.stringify({ error: "No file provided", success: false, data: [], pages: [], headers: [] }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
@@ -26,12 +26,13 @@ Deno.serve(async (req: Request) => {
     const uint8Array = new Uint8Array(arrayBuffer);
 
     const allPagesData = await extractAllPages(uint8Array);
-    const { transactions, headers } = parseAllPages(allPagesData);
+    const { transactions, headers, pages } = parseAllPages(allPagesData);
 
     return new Response(
       JSON.stringify({
         success: transactions.length > 0,
         data: transactions,
+        pages: pages,
         headers: headers,
         filename: file.name,
       }),
@@ -44,6 +45,7 @@ Deno.serve(async (req: Request) => {
         success: false,
         error: error instanceof Error ? error.message : String(error),
         data: [],
+        pages: [],
         headers: []
       }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
@@ -61,6 +63,11 @@ interface ColumnRange {
   header: string;
   minX: number;
   maxX: number;
+}
+
+interface PageData {
+  pageNumber: number;
+  transactions: Array<{ [key: string]: string }>;
 }
 
 async function extractAllPages(data: Uint8Array): Promise<TextItem[][]> {
@@ -93,10 +100,12 @@ async function extractAllPages(data: Uint8Array): Promise<TextItem[][]> {
 interface ParseResult {
   transactions: Array<{ [key: string]: string }>;
   headers: string[];
+  pages: PageData[];
 }
 
 function parseAllPages(allPagesData: TextItem[][]): ParseResult {
   let allTransactions: Array<{ [key: string]: string }> = [];
+  let pages: PageData[] = [];
   let globalHeaders: string[] = [];
   let normalizedHeaders: string[] = [];
   let columnRanges: ColumnRange[] = [];
@@ -125,34 +134,36 @@ function parseAllPages(allPagesData: TextItem[][]): ParseResult {
       columnRanges = calculateColumnRanges(headerRow);
     }
 
+    const pageTransactions: Array<{ [key: string]: string }> = [];
+
     if (pageIndex === 0 && headerRowIndex >= 0) {
       const dataStartIndex = headerRowIndex + 1;
+      const groupedTransactions = groupMultiLineTransactions(rows.slice(dataStartIndex), columnRanges, normalizedHeaders);
 
-      for (let i = dataStartIndex; i < rows.length; i++) {
-        const row = rows[i];
-
-        if (isFooterRow(row)) break;
-        if (!isTransactionRow(row)) continue;
-
-        const transaction = mapRowToColumns(row, columnRanges, globalHeaders, normalizedHeaders);
-
+      for (const transaction of groupedTransactions) {
+        if (isFooterTransaction(transaction)) break;
         if (hasValidTransactionData(transaction)) {
           allTransactions.push(transaction);
+          pageTransactions.push(transaction);
         }
       }
     } else if (pageIndex > 0 && columnRanges.length > 0) {
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
+      const groupedTransactions = groupMultiLineTransactions(rows, columnRanges, normalizedHeaders);
 
-        if (isHeaderRow(row) || isFooterRow(row)) continue;
-        if (!isTransactionRow(row)) continue;
-
-        const transaction = mapRowToColumns(row, columnRanges, globalHeaders, normalizedHeaders);
-
+      for (const transaction of groupedTransactions) {
+        if (isHeaderTransaction(transaction) || isFooterTransaction(transaction)) continue;
         if (hasValidTransactionData(transaction)) {
           allTransactions.push(transaction);
+          pageTransactions.push(transaction);
         }
       }
+    }
+
+    if (pageTransactions.length > 0) {
+      pages.push({
+        pageNumber: pageIndex + 1,
+        transactions: pageTransactions
+      });
     }
   }
 
@@ -163,12 +174,13 @@ function parseAllPages(allPagesData: TextItem[][]): ParseResult {
   return {
     transactions: allTransactions,
     headers: finalHeaders,
+    pages: pages,
   };
 }
 
 function groupItemsIntoRows(items: TextItem[]): TextItem[][] {
   const rowMap = new Map<number, TextItem[]>();
-  const tolerance = 3;
+  const tolerance = 5;
 
   items.forEach(item => {
     const rowKey = Math.round(item.y / tolerance) * tolerance;
@@ -185,6 +197,70 @@ function groupItemsIntoRows(items: TextItem[]): TextItem[][] {
     });
 
   return sortedRows;
+}
+
+function groupMultiLineTransactions(
+  rows: TextItem[][],
+  columnRanges: ColumnRange[],
+  normalizedHeaders: string[]
+): Array<{ [key: string]: string }> {
+  const transactions: Array<{ [key: string]: string }> = [];
+  let i = 0;
+
+  while (i < rows.length) {
+    const row = rows[i];
+
+    if (!isTransactionRow(row)) {
+      i++;
+      continue;
+    }
+
+    const transaction = mapRowToColumns(row, columnRanges, normalizedHeaders);
+
+    const hasDate = transaction['Date'] && transaction['Date'].length > 0;
+
+    if (!hasDate) {
+      i++;
+      continue;
+    }
+
+    let j = i + 1;
+    while (j < rows.length) {
+      const nextRow = rows[j];
+
+      if (isTransactionRow(nextRow)) {
+        const nextTransaction = mapRowToColumns(nextRow, columnRanges, normalizedHeaders);
+        const nextHasDate = nextTransaction['Date'] && nextTransaction['Date'].length > 0;
+
+        if (nextHasDate) {
+          break;
+        }
+      }
+
+      if (isFooterRow(nextRow) || isHeaderRow(nextRow)) {
+        break;
+      }
+
+      const continuationData = mapRowToColumns(nextRow, columnRanges, normalizedHeaders);
+
+      normalizedHeaders.forEach(header => {
+        if (continuationData[header] && continuationData[header].length > 0) {
+          if (transaction[header] && transaction[header].length > 0) {
+            transaction[header] += ' ' + continuationData[header];
+          } else {
+            transaction[header] = continuationData[header];
+          }
+        }
+      });
+
+      j++;
+    }
+
+    transactions.push(transaction);
+    i = j;
+  }
+
+  return transactions;
 }
 
 function calculateColumnRanges(headerRow: TextItem[]): ColumnRange[] {
@@ -211,7 +287,6 @@ function calculateColumnRanges(headerRow: TextItem[]): ColumnRange[] {
 function mapRowToColumns(
   row: TextItem[],
   columnRanges: ColumnRange[],
-  originalHeaders: string[],
   normalizedHeaders: string[]
 ): { [key: string]: string } {
   const transaction: { [key: string]: string } = {};
@@ -292,26 +367,14 @@ function isFooterRow(row: TextItem[]): boolean {
 }
 
 function isTransactionRow(row: TextItem[]): boolean {
-  if (row.length < 2) return false;
+  if (row.length < 1) return false;
 
   const joinedText = row.map(item => item.text).join(' ');
 
   const hasDate = /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{1,2}\s+\w{3}\s+\d{4}/.test(joinedText);
   const hasAmount = /\d+[,.]?\d*(?:[.,]\d{2})?(?:\s|$)/.test(joinedText);
 
-  const nonTransactionPatterns = [
-    /statement\s+(from|period|to)/i,
-    /opening\s+balance/i,
-    /closing\s+balance/i,
-    /account\s+(summary|number|name)/i,
-    /customer\s+(id|name)/i,
-    /branch\s+(code|name)/i,
-    /ifsc\s+code/i,
-  ];
-
-  const isNonTransaction = nonTransactionPatterns.some(pattern => pattern.test(joinedText));
-
-  return hasDate && hasAmount && !isNonTransaction;
+  return hasDate || hasAmount || row.length >= 1;
 }
 
 function hasValidTransactionData(transaction: { [key: string]: string }): boolean {
@@ -320,11 +383,13 @@ function hasValidTransactionData(transaction: { [key: string]: string }): boolea
 
   if (nonEmptyCount < 2) return false;
 
+  const hasDate = transaction['Date'] && transaction['Date'].length > 0;
+  if (!hasDate) return false;
+
   const transactionText = Object.values(transaction).join(' ').toLowerCase();
 
   const invalidPatterns = [
     /statement\s+(from|period|to)/,
-    /opening\s+balance/,
     /account\s+(summary|number)/,
     /customer\s+(id|name)/,
     /branch\s+(code|name)/,
@@ -332,6 +397,28 @@ function hasValidTransactionData(transaction: { [key: string]: string }): boolea
   ];
 
   return !invalidPatterns.some(pattern => pattern.test(transactionText));
+}
+
+function isHeaderTransaction(transaction: { [key: string]: string }): boolean {
+  const transactionText = Object.values(transaction).join(' ').toLowerCase();
+  const headerKeywords = [
+    'date', 'description', 'particulars', 'debit', 'credit',
+    'withdrawal', 'deposit', 'balance'
+  ];
+
+  const matchCount = headerKeywords.filter(keyword => transactionText.includes(keyword)).length;
+  return matchCount >= 3;
+}
+
+function isFooterTransaction(transaction: { [key: string]: string }): boolean {
+  const transactionText = Object.values(transaction).join(' ').toLowerCase();
+  const footerKeywords = [
+    'end of statement', 'closing balance', 'total', 'page',
+    'thank you', 'regards', 'signature', 'generated',
+    'terms and conditions', 'continued'
+  ];
+
+  return footerKeywords.some(keyword => transactionText.includes(keyword));
 }
 
 function normalizeHeaders(headers: string[]): string[] {
