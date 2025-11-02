@@ -98,6 +98,7 @@ interface ParseResult {
 function parseAllPages(allPagesData: TextItem[][]): ParseResult {
   let allTransactions: Array<{ [key: string]: string }> = [];
   let globalHeaders: string[] = [];
+  let normalizedHeaders: string[] = [];
   let columnRanges: ColumnRange[] = [];
 
   for (let pageIndex = 0; pageIndex < allPagesData.length; pageIndex++) {
@@ -120,6 +121,7 @@ function parseAllPages(allPagesData: TextItem[][]): ParseResult {
 
     if (headerRowIndex >= 0 && globalHeaders.length === 0) {
       globalHeaders = headerRow.map(item => item.text);
+      normalizedHeaders = normalizeHeaders(globalHeaders);
       columnRanges = calculateColumnRanges(headerRow);
     }
 
@@ -132,7 +134,7 @@ function parseAllPages(allPagesData: TextItem[][]): ParseResult {
         if (isFooterRow(row)) break;
         if (!isTransactionRow(row)) continue;
 
-        const transaction = mapRowToColumns(row, columnRanges, globalHeaders);
+        const transaction = mapRowToColumns(row, columnRanges, globalHeaders, normalizedHeaders);
 
         if (hasValidTransactionData(transaction)) {
           allTransactions.push(transaction);
@@ -145,7 +147,7 @@ function parseAllPages(allPagesData: TextItem[][]): ParseResult {
         if (isHeaderRow(row) || isFooterRow(row)) continue;
         if (!isTransactionRow(row)) continue;
 
-        const transaction = mapRowToColumns(row, columnRanges, globalHeaders);
+        const transaction = mapRowToColumns(row, columnRanges, globalHeaders, normalizedHeaders);
 
         if (hasValidTransactionData(transaction)) {
           allTransactions.push(transaction);
@@ -154,13 +156,13 @@ function parseAllPages(allPagesData: TextItem[][]): ParseResult {
     }
   }
 
-  const normalizedHeaders = globalHeaders.length > 0
-    ? normalizeHeaders(globalHeaders)
+  const finalHeaders = normalizedHeaders.length > 0
+    ? normalizedHeaders
     : ['Date', 'Description', 'Withdrawal', 'Deposit', 'Balance'];
 
   return {
     transactions: allTransactions,
-    headers: normalizedHeaders,
+    headers: finalHeaders,
   };
 }
 
@@ -209,11 +211,12 @@ function calculateColumnRanges(headerRow: TextItem[]): ColumnRange[] {
 function mapRowToColumns(
   row: TextItem[],
   columnRanges: ColumnRange[],
-  headers: string[]
+  originalHeaders: string[],
+  normalizedHeaders: string[]
 ): { [key: string]: string } {
   const transaction: { [key: string]: string } = {};
 
-  headers.forEach((header) => {
+  normalizedHeaders.forEach((header) => {
     transaction[header] = '';
   });
 
@@ -244,11 +247,11 @@ function mapRowToColumns(
   });
 
   columnAssignments.forEach((items, columnIndex) => {
-    const header = headers[columnIndex];
-    if (header) {
+    const normalizedHeader = normalizedHeaders[columnIndex];
+    if (normalizedHeader) {
       const sortedItems = items.sort((a, b) => a.x - b.x);
       const combinedText = sortedItems.map(item => item.text).join(' ');
-      transaction[header] = combinedText;
+      transaction[normalizedHeader] = combinedText;
     }
   });
 

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Download, Edit2, Trash2, Plus, Check, X, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Download, Edit2, Check, X } from 'lucide-react';
 import { Transaction } from '../types/transaction';
 import * as XLSX from 'xlsx';
 
@@ -14,27 +14,18 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
   const [editableData, setEditableData] = useState<Transaction[]>(data);
   const [editingCell, setEditingCell] = useState<{ row: number; col: string } | null>(null);
   const [editValue, setEditValue] = useState('');
-  const [currentPage, setCurrentPage] = useState(1);
-  const itemsPerPage = 10;
 
   const headers = initialHeaders && initialHeaders.length > 0
     ? initialHeaders
     : (data.length > 0 ? Object.keys(data[0]) : []);
 
-  const totalPages = Math.ceil(editableData.length / itemsPerPage);
-  const startIndex = (currentPage - 1) * itemsPerPage;
-  const endIndex = startIndex + itemsPerPage;
-  const currentData = editableData.slice(startIndex, endIndex);
-
   useEffect(() => {
     setEditableData(data);
-    setCurrentPage(1);
   }, [data]);
 
   const handleCellEdit = (rowIndex: number, column: keyof Transaction, value: string) => {
-    const actualIndex = startIndex + rowIndex;
     const newData = [...editableData];
-    newData[actualIndex] = { ...newData[actualIndex], [column]: value };
+    newData[rowIndex] = { ...newData[rowIndex], [column]: value };
     setEditableData(newData);
     onDataChange(newData);
   };
@@ -55,28 +46,6 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
     setEditValue('');
   };
 
-  const handleDeleteRow = (rowIndex: number) => {
-    const actualIndex = startIndex + rowIndex;
-    const newData = editableData.filter((_, index) => index !== actualIndex);
-    setEditableData(newData);
-    onDataChange(newData);
-    if (currentData.length === 1 && currentPage > 1) {
-      setCurrentPage(currentPage - 1);
-    }
-  };
-
-  const handleAddRow = () => {
-    const newRow: Transaction = {
-      date: '',
-      particulars: '',
-      withdrawal: '',
-      deposit: '',
-      balance: '',
-    };
-    const newData = [...editableData, newRow];
-    setEditableData(newData);
-    onDataChange(newData);
-  };
 
   const downloadExcel = () => {
     const formattedData = editableData.map(row => {
@@ -152,22 +121,13 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
           <h2 className="text-2xl font-bold text-gray-800">Transaction Preview</h2>
           <p className="text-gray-500 mt-1">{editableData.length} transactions found</p>
         </div>
-        <div className="flex space-x-3">
-          <button
-            onClick={handleAddRow}
-            className="flex items-center space-x-2 px-4 py-2 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-all duration-200 transform hover:scale-105 shadow-md hover:shadow-lg"
-          >
-            <Plus className="w-4 h-4" />
-            <span>Add Row</span>
-          </button>
-          <button
-            onClick={downloadExcel}
-            className="flex items-center space-x-2 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all duration-200 transform hover:scale-105 shadow-md hover:shadow-lg"
-          >
-            <Download className="w-5 h-5" />
-            <span>Download Excel</span>
-          </button>
-        </div>
+        <button
+          onClick={downloadExcel}
+          className="flex items-center space-x-2 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-all duration-200 transform hover:scale-105 shadow-md hover:shadow-lg"
+        >
+          <Download className="w-5 h-5" />
+          <span>Download Excel</span>
+        </button>
       </div>
 
       <div className="overflow-x-auto border border-gray-200 rounded-xl">
@@ -182,13 +142,10 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
                   {col.label}
                 </th>
               ))}
-              <th className="w-24 px-4 py-3 text-left text-sm font-semibold text-gray-700 border-b-2 border-gray-200">
-                Actions
-              </th>
             </tr>
           </thead>
           <tbody>
-            {currentData.map((row, rowIndex) => (
+            {editableData.map((row, rowIndex) => (
               <tr
                 key={rowIndex}
                 className="border-b border-gray-100 hover:bg-blue-50 transition-colors duration-150"
@@ -236,15 +193,6 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
                     )}
                   </td>
                 ))}
-                <td className="px-4 py-3">
-                  <button
-                    onClick={() => handleDeleteRow(rowIndex)}
-                    className="p-2 text-red-500 hover:bg-red-100 rounded-lg transition-all duration-200 transform hover:scale-110"
-                    title="Delete row"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </td>
               </tr>
             ))}
           </tbody>
@@ -253,29 +201,7 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
 
       <div className="mt-6 flex items-center justify-between">
         <div className="text-sm text-gray-500">
-          Showing {startIndex + 1} to {Math.min(endIndex, editableData.length)} of {editableData.length} transactions
-        </div>
-
-        <div className="flex items-center space-x-2">
-          <button
-            onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-            disabled={currentPage === 1}
-            className="p-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            <ChevronLeft className="w-5 h-5" />
-          </button>
-
-          <span className="text-sm font-medium text-gray-700">
-            Page {currentPage} of {totalPages}
-          </span>
-
-          <button
-            onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-            disabled={currentPage === totalPages}
-            className="p-2 rounded-lg border border-gray-300 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-          >
-            <ChevronRight className="w-5 h-5" />
-          </button>
+          Total: {editableData.length} transactions
         </div>
 
         <div className="text-sm text-gray-500">
