@@ -187,13 +187,14 @@ function groupItemsIntoRows(items: TextItem[]): TextItem[][] {
 
 function calculateColumnRanges(headerRow: TextItem[]): ColumnRange[] {
   const ranges: ColumnRange[] = [];
+  const sortedHeaders = [...headerRow].sort((a, b) => a.x - b.x);
 
-  for (let i = 0; i < headerRow.length; i++) {
-    const current = headerRow[i];
-    const next = headerRow[i + 1];
+  for (let i = 0; i < sortedHeaders.length; i++) {
+    const current = sortedHeaders[i];
+    const next = sortedHeaders[i + 1];
 
-    const minX = i === 0 ? 0 : current.x;
-    const maxX = next ? next.x : Infinity;
+    const minX = current.x - 5;
+    const maxX = next ? (current.x + next.x) / 2 : Infinity;
 
     ranges.push({
       header: current.text,
@@ -212,30 +213,41 @@ function mapRowToColumns(
 ): { [key: string]: string } {
   const transaction: { [key: string]: string } = {};
 
-  headers.forEach((header, index) => {
+  headers.forEach((header) => {
     transaction[header] = '';
   });
 
-  const columnAssignments = new Map<number, string[]>();
+  const columnAssignments = new Map<number, TextItem[]>();
 
   row.forEach(item => {
+    let bestMatch = -1;
+    let bestDistance = Infinity;
+
     for (let i = 0; i < columnRanges.length; i++) {
       const range = columnRanges[i];
 
       if (item.x >= range.minX && item.x < range.maxX) {
-        if (!columnAssignments.has(i)) {
-          columnAssignments.set(i, []);
+        const distance = Math.abs(item.x - range.minX);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestMatch = i;
         }
-        columnAssignments.get(i)!.push(item.text);
-        break;
       }
+    }
+
+    if (bestMatch >= 0) {
+      if (!columnAssignments.has(bestMatch)) {
+        columnAssignments.set(bestMatch, []);
+      }
+      columnAssignments.get(bestMatch)!.push(item);
     }
   });
 
-  columnAssignments.forEach((texts, columnIndex) => {
+  columnAssignments.forEach((items, columnIndex) => {
     const header = headers[columnIndex];
     if (header) {
-      const combinedText = texts.join('');
+      const sortedItems = items.sort((a, b) => a.x - b.x);
+      const combinedText = sortedItems.map(item => item.text).join(' ');
       transaction[header] = combinedText;
     }
   });

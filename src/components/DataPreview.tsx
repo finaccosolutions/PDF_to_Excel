@@ -85,8 +85,9 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
         const value = row[header as keyof Transaction];
         const lowerHeader = header.toLowerCase();
 
-        if (value && (lowerHeader.includes('withdrawal') || lowerHeader.includes('deposit') || lowerHeader.includes('balance') || lowerHeader.includes('amount'))) {
-          const numValue = parseFloat(value);
+        if (value && (lowerHeader.includes('withdrawal') || lowerHeader.includes('deposit') || lowerHeader.includes('balance') || lowerHeader.includes('amount') || lowerHeader.includes('debit') || lowerHeader.includes('credit'))) {
+          const cleanedValue = value.replace(/,/g, '').trim();
+          const numValue = parseFloat(cleanedValue);
           newRow[header] = isNaN(numValue) ? value : numValue;
         } else {
           newRow[header] = value;
@@ -98,18 +99,18 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
     const worksheet = XLSX.utils.json_to_sheet(formattedData);
 
     const columnWidths = headers.map(h => ({
-      wch: h.toLowerCase().includes('description') || h.toLowerCase().includes('particulars')
-        ? 40
+      wch: h.toLowerCase().includes('description') || h.toLowerCase().includes('particulars') || h.toLowerCase().includes('narration')
+        ? 50
         : h.toLowerCase().includes('date')
           ? 12
-          : 15
+          : 18
     }));
     worksheet['!cols'] = columnWidths;
 
     const amountColumnIndices = headers
       .map((h, idx) => {
         const lowerH = h.toLowerCase();
-        if (lowerH.includes('withdrawal') || lowerH.includes('deposit') || lowerH.includes('balance') || lowerH.includes('amount')) {
+        if (lowerH.includes('withdrawal') || lowerH.includes('deposit') || lowerH.includes('balance') || lowerH.includes('amount') || lowerH.includes('debit') || lowerH.includes('credit')) {
           return idx;
         }
         return -1;
@@ -120,7 +121,8 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
       const colLetter = XLSX.utils.encode_col(colIdx);
       for (let rowIdx = 2; rowIdx <= formattedData.length + 1; rowIdx++) {
         const cellRef = `${colLetter}${rowIdx}`;
-        if (worksheet[cellRef]) {
+        if (worksheet[cellRef] && typeof worksheet[cellRef].v === 'number') {
+          worksheet[cellRef].t = 'n';
           worksheet[cellRef].z = '#,##0.00';
         }
       }
