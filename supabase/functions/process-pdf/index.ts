@@ -43,10 +43,11 @@ Deno.serve(async (req: Request) => {
     console.log("Extracted PDF text length:", text.length);
 
     if (!text || text.trim().length < 20) {
+      console.log("Text extraction failed or too short");
       return new Response(
         JSON.stringify({
           success: false,
-          error: "Could not extract text from PDF. Please ensure the PDF is not password protected or encrypted.",
+          error: "Could not extract enough text from PDF. The PDF might be image-based, password protected, or encrypted.",
           data: [],
           filename: file.name,
         }),
@@ -61,10 +62,11 @@ Deno.serve(async (req: Request) => {
     console.log("Parsed transactions count:", transactions.length);
 
     if (transactions.length === 0) {
+      console.log("No transactions found in parsed text");
       return new Response(
         JSON.stringify({
           success: false,
-          error: "No transactions found in PDF. Please ensure your PDF contains a valid bank statement with transaction data.",
+          error: "No transaction lines found. Please ensure your PDF is a bank statement with transaction data.",
           data: [],
           filename: file.name,
         }),
@@ -91,7 +93,7 @@ Deno.serve(async (req: Request) => {
     return new Response(
       JSON.stringify({
         success: false,
-        error: error instanceof Error ? error.message : "Failed to process PDF. Please try again.",
+        error: error instanceof Error ? error.message : "Failed to process PDF",
         data: [],
       }),
       {
@@ -107,35 +109,58 @@ function extractTextFromPDF(arrayBuffer: ArrayBuffer): string {
   let text = "";
 
   try {
-    const latin1Decoder = new TextDecoder("latin1");
-    const decodedPDF = latin1Decoder.decode(uint8Array);
+    const utf8Decoder = new TextDecoder("utf-8", { fatal: false });
+    let decodedPDF = utf8Decoder.decode(uint8Array);
 
-    text = decodedPDF
-      .replace(/\0/g, " ")
-      .match(/[\x20-\x7E\n\r\t]+/g)
-      ?.join(" ") || "";
+    if (decodedPDF.indexOf("stream") === -1) {
+      const latin1Decoder = new TextDecoder("latin1");
+      decodedPDF = latin1Decoder.decode(uint8Array);
+    }
 
-    const hexStrings = decodedPDF.match(/<[0-9A-Fa-f]+>/g) || [];
-    for (const hexStr of hexStrings) {
-      try {
-        const hex = hexStr.slice(1, -1);
-        let decoded = "";
-        for (let i = 0; i < hex.length; i += 2) {
-          decoded += String.fromCharCode(parseInt(hex.substr(i, 2), 16));
+    const textContent: string[] = [];
+
+    const streamMatches = decodedPDF.split("stream");
+    for (let i = 1; i < streamMatches.length; i++) {
+      const streamPart = streamMatches[i];
+      const endIndex = streamPart.indexOf("endstream");
+      if (endIndex > 0) {
+        const streamData = streamPart.substring(0, endIndex);
+        const cleaned = streamData
+          .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]/g, " ")
+          .replace(/\s+/g, " ");
+        if (cleaned.trim()) {
+          textContent.push(cleaned);
         }
-        decoded = decoded.replace(/[^\x20-\x7E\n\r]/g, " ");
-        text += " " + decoded;
-      } catch {
       }
     }
 
+    const parenStart = decodedPDF.indexOf("(");
+    let currentIndex = parenStart;
+    while (currentIndex > -1 && currentIndex < decodedPDF.length) {
+      const closeIndex = decodedPDF.indexOf(")", currentIndex);
+      if (closeIndex === -1) break;
+
+      const content = decodedPDF.substring(currentIndex + 1, closeIndex);
+      if (content.length > 3 && content.length < 500) {
+        const cleaned = content
+          .replace(/\\\(/g, "(")
+          .replace(/\\\)/g, ")")
+          .replace(/\\\\\\\\/g, "\\")
+          .replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F-\x9F]/g, " ")
+          .replace(/\s+/g, " ");
+        if (cleaned.trim().length > 2) {
+          textContent.push(cleaned);
+        }
+      }
+
+      currentIndex = decodedPDF.indexOf("(", closeIndex);
+    }
+
+    text = textContent.join(" ");
+
     text = text
-      .replace(/\(([^)]*?)\)/g, (_, content) => {
-        return content
-          .replace(/\\\\/g, "")
-          .replace(/[^\x20-\x7E]/g, " ");
-      })
       .replace(/\s+/g, " ")
+      .replace(/[^\x20-\x7E\n\r\t]/g, " ")
       .trim();
 
     return text;
@@ -151,52 +176,29 @@ function parseTransactions(text: string): Transaction[] {
     .map(line => line.trim())
     .filter(line => line.length > 3);
 
+  console.log(`Processing ${lines.length} lines`);
+
   const transactions: Transaction[] = [];
   const seenLines = new Set<string>();
 
-  const datePatterns = [
-    /(\d{1,2}[-\/\.]\d{1,2}[-\/\.]\d{2,4})/,
-    /(\d{4}[-\/\.]\d{1,2}[-\/\.]\d{1,2})/,
-    /(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{4})/i,
-  ];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
 
-  const skipPatterns = [
-    /^page\s+\d+$/i,
-    /^statement\s+period/i,
-    /^account\s+number/i,
-    /^branch/i,
-    /^ifsc/i,
-    /^address/i,
-    /^name/i,
-    /^date|particulars|deposit|withdrawal|balance|debit|credit/i,
-  ];
+    if (seenLines.has(line) || line.length < 10) continue;
 
-  for (const line of lines) {
-    if (seenLines.has(line)) continue;
-    seenLines.add(line);
+    const lineKey = line.substring(0, 50);
+    if (seenLines.has(lineKey)) continue;
+    seenLines.add(lineKey);
 
-    if (skipPatterns.some(p => p.test(line))) continue;
+    if (isHeaderLine(line)) continue;
 
-    let foundDate = false;
-    let dateStr = "";
-
-    for (const pattern of datePatterns) {
-      const match = line.match(pattern);
-      if (match) {
-        foundDate = true;
-        dateStr = match[1];
-        break;
-      }
-    }
-
-    if (!foundDate) continue;
+    const dateMatch = extractDate(line);
+    if (!dateMatch) continue;
 
     const amounts = extractAmounts(line);
     if (amounts.length === 0) continue;
 
-    const partOfLine = line.replace(dateStr, "").trim();
-    const particulars = extractParticulars(partOfLine, amounts);
-
+    const particulars = extractParticulars(line, dateMatch, amounts);
     if (particulars.length < 2) continue;
 
     let withdrawal = "";
@@ -204,22 +206,36 @@ function parseTransactions(text: string): Transaction[] {
     let balance = "";
 
     if (amounts.length >= 3) {
-      withdrawal = formatAmount(amounts[0]);
-      deposit = formatAmount(amounts[1]);
-      balance = formatAmount(amounts[2]);
-    } else if (amounts.length === 2) {
-      const isDebit = /debit|dr|withdrawal|chq|cheque|paid/i.test(line);
-      const isCredit = /credit|cr|deposit|received/i.test(line);
+      balance = formatAmount(amounts[amounts.length - 1]);
+      const firstAmount = amounts[0];
+      const secondAmount = amounts.length > 1 ? amounts[1] : "";
 
-      if (isDebit) {
+      const isDebit = line.match(/debit|dr|withdrawal|chq|cheque|paid|atm|transfer/i);
+      const isCredit = line.match(/credit|cr|deposit|received|salary|interest/i);
+
+      if (isDebit && !isCredit) {
+        withdrawal = formatAmount(firstAmount);
+      } else if (isCredit && !isDebit) {
+        deposit = formatAmount(firstAmount);
+      } else if (secondAmount) {
+        withdrawal = formatAmount(firstAmount);
+        deposit = formatAmount(secondAmount);
+      } else {
+        withdrawal = formatAmount(firstAmount);
+      }
+    } else if (amounts.length === 2) {
+      const isDebit = line.match(/debit|dr|withdrawal|chq|cheque|paid|atm|transfer/i);
+      const isCredit = line.match(/credit|cr|deposit|received|salary|interest/i);
+
+      if (isDebit && !isCredit) {
         withdrawal = formatAmount(amounts[0]);
         balance = formatAmount(amounts[1]);
-      } else if (isCredit) {
+      } else if (isCredit && !isDebit) {
         deposit = formatAmount(amounts[0]);
         balance = formatAmount(amounts[1]);
       } else {
-        const amt0 = parseFloat(amounts[0]);
-        const amt1 = parseFloat(amounts[1]);
+        const amt0 = parseFloat(amounts[0].replace(/[,.]/g, ""));
+        const amt1 = parseFloat(amounts[1].replace(/[,.]/g, ""));
         if (amt1 > amt0) {
           deposit = formatAmount(amounts[0]);
           balance = formatAmount(amounts[1]);
@@ -232,25 +248,80 @@ function parseTransactions(text: string): Transaction[] {
       balance = formatAmount(amounts[0]);
     }
 
-    transactions.push({
-      date: dateStr,
-      particulars: particulars.substring(0, 80),
-      withdrawal,
-      deposit,
-      balance,
-    });
+    if (balance || withdrawal || deposit) {
+      transactions.push({
+        date: dateMatch,
+        particulars: particulars.substring(0, 100),
+        withdrawal,
+        deposit,
+        balance,
+      });
+    }
   }
 
+  console.log(`Parsed ${transactions.length} transactions`);
   return transactions.slice(0, 1000);
 }
 
-function extractAmounts(line: string): string[] {
-  const amountPattern = /\d{1,3}(?:[,.]\d{3})*(?:[,.]\d{2})?/g;
-  const matches = line.match(amountPattern) || [];
+function isHeaderLine(line: string): boolean {
+  const headerPatterns = [
+    "page",
+    "statement",
+    "account",
+    "branch",
+    "ifsc",
+    "name",
+    "address",
+    "date",
+    "particulars",
+    "deposit",
+    "withdrawal",
+    "balance",
+    "debit",
+    "credit",
+  ];
 
-  return matches.filter(m => {
+  const lowerLine = line.toLowerCase();
+  return headerPatterns.some(p => lowerLine.includes(p) && line.length < 50);
+}
+
+function extractDate(line: string): string {
+  const patterns = [
+    /(\d{1,2}[-\/\.]\d{1,2}[-\/\.]\d{2,4})/,
+    /(\d{4}[-\/\.]\d{1,2}[-\/\.]\d{1,2})/,
+    /(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|May|June|July|August|September|October|November|December)[a-z]*\s+\d{4})/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = line.match(pattern);
+    if (match) {
+      return match[1];
+    }
+  }
+
+  return "";
+}
+
+function extractAmounts(line: string): string[] {
+  const patterns = [
+    /\d{1,3}(?:,\d{3})*\.\d{2}/g,
+    /\d{1,3}(?:\.\d{3})*,\d{2}/g,
+    /\d+\.\d{2}/g,
+    /\d+,\d{2}/g,
+  ];
+
+  const matches = new Set<string>();
+
+  for (const pattern of patterns) {
+    const found = line.match(pattern);
+    if (found) {
+      found.forEach(m => matches.add(m));
+    }
+  }
+
+  return Array.from(matches).filter(m => {
     const num = parseFloat(m.replace(/[,.]/g, ""));
-    return num > 0;
+    return num >= 0.01 && num < 999999999;
   });
 }
 
@@ -259,13 +330,17 @@ function formatAmount(amount: string): string {
   return isNaN(num) ? "" : num.toFixed(2);
 }
 
-function extractParticulars(text: string, amounts: string[]): string {
-  let result = text;
+function extractParticulars(line: string, date: string, amounts: string[]): string {
+  let result = line.replace(date, "");
+
   for (const amount of amounts) {
-    result = result.replace(new RegExp(amount.replace(/[.]/g, "\\."), "g"), "");
+    result = result.replace(amount, "");
   }
-  return result
+
+  result = result
     .replace(/\s+/g, " ")
     .replace(/^[:-.,\s]+|[:-.,\s]+$/g, "")
     .trim();
+
+  return result;
 }
