@@ -25,8 +25,8 @@ Deno.serve(async (req: Request) => {
     const arrayBuffer = await file.arrayBuffer();
     const uint8Array = new Uint8Array(arrayBuffer);
 
-    const pdfData = await extractAllPages(uint8Array);
-    const { transactions, headers } = parseTransactions(pdfData);
+    const allPagesData = await extractAllPages(uint8Array);
+    const { transactions, headers } = parseAllPages(allPagesData);
 
     return new Response(
       JSON.stringify({
@@ -57,10 +57,16 @@ interface TextItem {
   x: number;
 }
 
+interface ColumnRange {
+  header: string;
+  minX: number;
+  maxX: number;
+}
+
 async function extractAllPages(data: Uint8Array): Promise<TextItem[][]> {
   try {
     const pdf = await pdfjsLib.getDocument({ data }).promise;
-    const allItems: TextItem[][] = [];
+    const allPages: TextItem[][] = [];
 
     for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
       const page = await pdf.getPage(pageNum);
@@ -69,15 +75,15 @@ async function extractAllPages(data: Uint8Array): Promise<TextItem[][]> {
       const pageItems: TextItem[] = textContent.items
         .filter((item: any) => item.str && item.str.trim())
         .map((item: any) => ({
-          text: item.str,
+          text: item.str.trim(),
           y: item.transform[5],
           x: item.transform[4],
         }));
 
-      allItems.push(pageItems);
+      allPages.push(pageItems);
     }
 
-    return allItems;
+    return allPages;
   } catch (error) {
     console.error('PDF extraction error:', error);
     throw new Error('Failed to extract text from PDF');
@@ -89,66 +95,81 @@ interface ParseResult {
   headers: string[];
 }
 
-function parseTransactions(pageItems: TextItem[][]): ParseResult {
-  const allRows = buildRowsFromPages(pageItems);
+function parseAllPages(allPagesData: TextItem[][]): ParseResult {
+  let allTransactions: Array<{ [key: string]: string }> = [];
+  let globalHeaders: string[] = [];
+  let columnRanges: ColumnRange[] = [];
 
-  if (allRows.length === 0) {
-    return { transactions: [], headers: [] };
-  }
+  for (let pageIndex = 0; pageIndex < allPagesData.length; pageIndex++) {
+    const pageItems = allPagesData[pageIndex];
 
-  let headerRow: string[] = [];
-  let dataStartIndex = 0;
+    if (pageItems.length === 0) continue;
 
-  for (let i = 0; i < allRows.length; i++) {
-    const row = allRows[i];
-    if (isHeaderRow(row)) {
-      headerRow = row;
-      dataStartIndex = i + 1;
-      break;
+    const rows = groupItemsIntoRows(pageItems);
+
+    let headerRowIndex = -1;
+    let headerRow: TextItem[] = [];
+
+    for (let i = 0; i < rows.length && i < 30; i++) {
+      if (isHeaderRow(rows[i])) {
+        headerRowIndex = i;
+        headerRow = rows[i];
+        break;
+      }
     }
-  }
 
-  if (headerRow.length === 0) {
-    headerRow = ['Date', 'Description', 'Withdrawal', 'Deposit', 'Balance'];
-  }
+    if (headerRowIndex >= 0 && globalHeaders.length === 0) {
+      globalHeaders = headerRow.map(item => item.text);
+      columnRanges = calculateColumnRanges(headerRow);
+    }
 
-  const transactions: Array<{ [key: string]: string }> = [];
+    if (pageIndex === 0 && headerRowIndex >= 0) {
+      const dataStartIndex = headerRowIndex + 1;
 
-  for (let i = dataStartIndex; i < allRows.length; i++) {
-    const row = allRows[i];
+      for (let i = dataStartIndex; i < rows.length; i++) {
+        const row = rows[i];
 
-    if (isFooterRow(row)) break;
+        if (isFooterRow(row)) break;
+        if (!isTransactionRow(row)) continue;
 
-    if (isTransactionRow(row, headerRow)) {
-      const transaction = mapRowToTransaction(row, headerRow);
-      if (hasTransactionData(transaction)) {
-        transactions.push(transaction);
+        const transaction = mapRowToColumns(row, columnRanges, globalHeaders);
+
+        if (hasValidTransactionData(transaction)) {
+          allTransactions.push(transaction);
+        }
+      }
+    } else if (pageIndex > 0 && columnRanges.length > 0) {
+      for (let i = 0; i < rows.length; i++) {
+        const row = rows[i];
+
+        if (isHeaderRow(row) || isFooterRow(row)) continue;
+        if (!isTransactionRow(row)) continue;
+
+        const transaction = mapRowToColumns(row, columnRanges, globalHeaders);
+
+        if (hasValidTransactionData(transaction)) {
+          allTransactions.push(transaction);
+        }
       }
     }
   }
 
+  const normalizedHeaders = globalHeaders.length > 0
+    ? normalizeHeaders(globalHeaders)
+    : ['Date', 'Description', 'Withdrawal', 'Deposit', 'Balance'];
+
   return {
-    transactions,
-    headers: normalizeHeaders(headerRow),
+    transactions: allTransactions,
+    headers: normalizedHeaders,
   };
 }
 
-function buildRowsFromPages(pageItems: TextItem[][]): string[][] {
-  const rows: string[][] = [];
-
-  for (const pageItems_ of pageItems) {
-    const pageRows = buildRowsFromItems(pageItems_);
-    rows.push(...pageRows);
-  }
-
-  return rows;
-}
-
-function buildRowsFromItems(items: TextItem[]): string[][] {
+function groupItemsIntoRows(items: TextItem[]): TextItem[][] {
   const rowMap = new Map<number, TextItem[]>();
+  const tolerance = 3;
 
   items.forEach(item => {
-    const rowKey = Math.round(item.y / 2) * 2;
+    const rowKey = Math.round(item.y / tolerance) * tolerance;
     if (!rowMap.has(rowKey)) {
       rowMap.set(rowKey, []);
     }
@@ -157,98 +178,150 @@ function buildRowsFromItems(items: TextItem[]): string[][] {
 
   const sortedRows = Array.from(rowMap.entries())
     .sort((a, b) => b[0] - a[0])
-    .map(([_, items_]) => {
-      return items_
-        .sort((a, b) => a.x - b.x)
-        .map(item => item.text);
+    .map(([_, rowItems]) => {
+      return rowItems.sort((a, b) => a.x - b.x);
     });
 
   return sortedRows;
 }
 
-function isHeaderRow(row: string[]): boolean {
-  if (row.length < 2) return false;
+function calculateColumnRanges(headerRow: TextItem[]): ColumnRange[] {
+  const ranges: ColumnRange[] = [];
 
-  const headerKeywords = [
-    'date', 'description', 'particulars', 'debit', 'credit',
-    'withdrawal', 'deposit', 'balance', 'amount', 'transaction',
-    'reference', 'memo', 'cheque'
-  ];
+  for (let i = 0; i < headerRow.length; i++) {
+    const current = headerRow[i];
+    const next = headerRow[i + 1];
 
-  const lowerRow = row.map(cell => cell.toLowerCase());
-  const matchCount = lowerRow.filter(cell =>
-    headerKeywords.some(keyword => cell.includes(keyword))
-  ).length;
+    const minX = i === 0 ? 0 : current.x;
+    const maxX = next ? next.x : Infinity;
 
-  const hasNoDate = !lowerRow.some(cell =>
-    /^\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}/.test(cell)
-  );
+    ranges.push({
+      header: current.text,
+      minX: minX,
+      maxX: maxX,
+    });
+  }
 
-  return matchCount >= 2 && hasNoDate;
+  return ranges;
 }
 
-function isFooterRow(row: string[]): boolean {
-  const footerKeywords = [
-    'end of statement', 'closing balance', 'total', 'page',
-    'thank you', 'regards', 'signature', 'generated',
-    'terms and conditions'
-  ];
-
-  const joinedRow = row.join(' ').toLowerCase();
-  return footerKeywords.some(keyword => joinedRow.includes(keyword));
-}
-
-function isTransactionRow(row: string[], headers: string[]): boolean {
-  if (row.length < 2) return false;
-
-  const joinedRow = row.join(' ');
-
-  const hasDate = /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{1,2}\s+\w{3}\s+\d{4}/.test(joinedRow);
-  const hasAmount = /\d+(?:[.,]\d{2})?(?:\s|$)/.test(joinedRow);
-
-  return hasDate && hasAmount;
-}
-
-function mapRowToTransaction(row: string[], headers: string[]): { [key: string]: string } {
+function mapRowToColumns(
+  row: TextItem[],
+  columnRanges: ColumnRange[],
+  headers: string[]
+): { [key: string]: string } {
   const transaction: { [key: string]: string } = {};
 
   headers.forEach((header, index) => {
-    transaction[header] = row[index]?.trim() || '';
+    transaction[header] = '';
+  });
+
+  const columnAssignments = new Map<number, string[]>();
+
+  row.forEach(item => {
+    for (let i = 0; i < columnRanges.length; i++) {
+      const range = columnRanges[i];
+
+      if (item.x >= range.minX && item.x < range.maxX) {
+        if (!columnAssignments.has(i)) {
+          columnAssignments.set(i, []);
+        }
+        columnAssignments.get(i)!.push(item.text);
+        break;
+      }
+    }
+  });
+
+  columnAssignments.forEach((texts, columnIndex) => {
+    const header = headers[columnIndex];
+    if (header) {
+      transaction[header] = texts.join(' ');
+    }
   });
 
   return transaction;
 }
 
-function hasTransactionData(transaction: { [key: string]: string }): boolean {
-  return Object.values(transaction).some(value => value && value.length > 0);
+function isHeaderRow(row: TextItem[]): boolean {
+  if (row.length < 2) return false;
+
+  const headerKeywords = [
+    'date', 'description', 'particulars', 'debit', 'credit',
+    'withdrawal', 'deposit', 'balance', 'amount', 'transaction',
+    'reference', 'memo', 'cheque', 'narration', 'details'
+  ];
+
+  const texts = row.map(item => item.text.toLowerCase());
+  const matchCount = texts.filter(text =>
+    headerKeywords.some(keyword => text.includes(keyword))
+  ).length;
+
+  const hasNoDate = !texts.some(text =>
+    /^\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}/.test(text)
+  );
+
+  return matchCount >= 2 && hasNoDate;
+}
+
+function isFooterRow(row: TextItem[]): boolean {
+  const footerKeywords = [
+    'end of statement', 'closing balance', 'total', 'page',
+    'thank you', 'regards', 'signature', 'generated',
+    'terms and conditions', 'continued'
+  ];
+
+  const joinedText = row.map(item => item.text).join(' ').toLowerCase();
+  return footerKeywords.some(keyword => joinedText.includes(keyword));
+}
+
+function isTransactionRow(row: TextItem[]): boolean {
+  if (row.length < 2) return false;
+
+  const joinedText = row.map(item => item.text).join(' ');
+
+  const hasDate = /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{1,2}\s+\w{3}\s+\d{4}/.test(joinedText);
+  const hasAmount = /\d+(?:[.,]\d{2})?(?:\s|$)/.test(joinedText);
+
+  return hasDate && hasAmount;
+}
+
+function hasValidTransactionData(transaction: { [key: string]: string }): boolean {
+  const values = Object.values(transaction);
+  const nonEmptyCount = values.filter(v => v && v.length > 0).length;
+
+  return nonEmptyCount >= 2;
 }
 
 function normalizeHeaders(headers: string[]): string[] {
-  const normalized: { [key: string]: boolean } = {};
-  const result: string[] = [];
-
   const headerMap: { [key: string]: string } = {
     'date': 'Date',
     'description': 'Description',
     'particulars': 'Particulars',
+    'narration': 'Narration',
+    'details': 'Details',
     'debit': 'Withdrawal',
     'withdrawal': 'Withdrawal',
     'credit': 'Deposit',
     'deposit': 'Deposit',
     'balance': 'Balance',
     'amount': 'Amount',
-    'memo': 'Description',
+    'memo': 'Memo',
     'reference': 'Reference',
+    'ref': 'Reference',
     'cheque': 'Cheque',
+    'chq': 'Cheque',
   };
+
+  const result: string[] = [];
+  const seen = new Set<string>();
 
   headers.forEach(header => {
     const lower = header.toLowerCase();
-    const normalized_ = headerMap[lower] || header;
+    const normalized = headerMap[lower] || header;
 
-    if (!normalized[normalized_]) {
-      normalized[normalized_] = true;
-      result.push(normalized_);
+    if (!seen.has(normalized)) {
+      seen.add(normalized);
+      result.push(normalized);
     }
   });
 

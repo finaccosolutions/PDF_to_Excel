@@ -79,10 +79,23 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
   };
 
   const downloadExcel = () => {
-    const worksheet = XLSX.utils.json_to_sheet(editableData);
+    const formattedData = editableData.map(row => {
+      const newRow: any = {};
+      headers.forEach(header => {
+        const value = row[header as keyof Transaction];
+        const lowerHeader = header.toLowerCase();
 
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'Transactions');
+        if (value && (lowerHeader.includes('withdrawal') || lowerHeader.includes('deposit') || lowerHeader.includes('balance') || lowerHeader.includes('amount'))) {
+          const numValue = parseFloat(value);
+          newRow[header] = isNaN(numValue) ? value : numValue;
+        } else {
+          newRow[header] = value;
+        }
+      });
+      return newRow;
+    });
+
+    const worksheet = XLSX.utils.json_to_sheet(formattedData);
 
     const columnWidths = headers.map(h => ({
       wch: h.toLowerCase().includes('description') || h.toLowerCase().includes('particulars')
@@ -92,6 +105,29 @@ export default function DataPreview({ data, filename, onDataChange, headers: ini
           : 15
     }));
     worksheet['!cols'] = columnWidths;
+
+    const amountColumnIndices = headers
+      .map((h, idx) => {
+        const lowerH = h.toLowerCase();
+        if (lowerH.includes('withdrawal') || lowerH.includes('deposit') || lowerH.includes('balance') || lowerH.includes('amount')) {
+          return idx;
+        }
+        return -1;
+      })
+      .filter(idx => idx !== -1);
+
+    amountColumnIndices.forEach(colIdx => {
+      const colLetter = XLSX.utils.encode_col(colIdx);
+      for (let rowIdx = 2; rowIdx <= formattedData.length + 1; rowIdx++) {
+        const cellRef = `${colLetter}${rowIdx}`;
+        if (worksheet[cellRef]) {
+          worksheet[cellRef].z = '#,##0.00';
+        }
+      }
+    });
+
+    const workbook = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(workbook, worksheet, 'Transactions');
 
     const cleanFilename = filename.replace('.pdf', '');
     XLSX.writeFile(workbook, `${cleanFilename}_transactions.xlsx`);
