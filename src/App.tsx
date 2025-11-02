@@ -10,6 +10,7 @@ import { AlertCircle } from 'lucide-react';
 function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [headers, setHeaders] = useState<string[]>([]);
   const [filename, setFilename] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -26,12 +27,14 @@ function App() {
     setIsProcessing(true);
     setError(null);
     setTransactions([]);
+    setHeaders([]);
 
     try {
       const result = await processPDF(selectedFile);
 
       if (result.success && result.data && result.data.length > 0) {
         setTransactions(result.data);
+        setHeaders(result.headers || []);
         setFilename(result.filename);
       } else {
         setError(
@@ -83,6 +86,7 @@ function App() {
               data={transactions}
               filename={filename}
               onDataChange={handleDataChange}
+              headers={headers}
             />
           </div>
         )}

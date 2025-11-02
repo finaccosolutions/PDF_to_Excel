@@ -7,14 +7,19 @@ interface DataPreviewProps {
   data: Transaction[];
   filename: string;
   onDataChange: (data: Transaction[]) => void;
+  headers?: string[];
 }
 
-export default function DataPreview({ data, filename, onDataChange }: DataPreviewProps) {
+export default function DataPreview({ data, filename, onDataChange, headers: initialHeaders }: DataPreviewProps) {
   const [editableData, setEditableData] = useState<Transaction[]>(data);
   const [editingCell, setEditingCell] = useState<{ row: number; col: string } | null>(null);
   const [editValue, setEditValue] = useState('');
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
+
+  const headers = initialHeaders && initialHeaders.length > 0
+    ? initialHeaders
+    : (data.length > 0 ? Object.keys(data[0]) : []);
 
   const totalPages = Math.ceil(editableData.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
@@ -74,39 +79,33 @@ export default function DataPreview({ data, filename, onDataChange }: DataPrevie
   };
 
   const downloadExcel = () => {
-    const worksheet = XLSX.utils.json_to_sheet(
-      editableData.map(row => ({
-        Date: row.date,
-        Particulars: row.particulars,
-        Withdrawal: row.withdrawal,
-        Deposit: row.deposit,
-        Balance: row.balance,
-      }))
-    );
+    const worksheet = XLSX.utils.json_to_sheet(editableData);
 
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, 'Transactions');
 
-    const columnWidths = [
-      { wch: 12 },
-      { wch: 40 },
-      { wch: 15 },
-      { wch: 15 },
-      { wch: 15 },
-    ];
+    const columnWidths = headers.map(h => ({
+      wch: h.toLowerCase().includes('description') || h.toLowerCase().includes('particulars')
+        ? 40
+        : h.toLowerCase().includes('date')
+          ? 12
+          : 15
+    }));
     worksheet['!cols'] = columnWidths;
 
     const cleanFilename = filename.replace('.pdf', '');
     XLSX.writeFile(workbook, `${cleanFilename}_transactions.xlsx`);
   };
 
-  const columns = [
-    { key: 'date', label: 'Date', width: 'w-32' },
-    { key: 'particulars', label: 'Particulars', width: 'w-96' },
-    { key: 'withdrawal', label: 'Withdrawal', width: 'w-32' },
-    { key: 'deposit', label: 'Deposit', width: 'w-32' },
-    { key: 'balance', label: 'Balance', width: 'w-32' },
-  ];
+  const columns = headers.map(header => ({
+    key: header,
+    label: header,
+    width: header.toLowerCase().includes('description') || header.toLowerCase().includes('particulars')
+      ? 'w-96'
+      : header.toLowerCase().includes('date')
+        ? 'w-32'
+        : 'w-32'
+  }));
 
   return (
     <div className="w-full bg-white rounded-2xl shadow-xl p-6 animate-fadeIn">

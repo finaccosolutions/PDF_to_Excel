@@ -1,3 +1,5 @@
+import * as pdfjsLib from "npm:pdfjs-dist@4.0.379/legacy/build/pdf.mjs";
+
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
@@ -15,204 +17,206 @@ Deno.serve(async (req: Request) => {
 
     if (!file) {
       return new Response(
-        JSON.stringify({ error: "No file", success: false, data: [] }),
+        JSON.stringify({ error: "No file provided", success: false, data: [], headers: [] }),
         { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
       );
     }
 
     const arrayBuffer = await file.arrayBuffer();
-    const text = extractTextFromPDF(arrayBuffer);
-    const lines = text.split(/[\n\r]+/).filter(l => l.trim().length > 0);
+    const uint8Array = new Uint8Array(arrayBuffer);
 
-    const transactions = parseTransactions(text);
+    const pdfText = await extractTextFromPDF(uint8Array);
+    const { data, headers } = parseTabularData(pdfText);
 
     return new Response(
       JSON.stringify({
-        success: transactions.length > 0,
-        data: transactions,
+        success: data.length > 0,
+        data: data,
+        headers: headers,
         filename: file.name,
-        debug: {
-          extractedTextLength: text.length,
-          linesCount: lines.length,
-          transactionsFound: transactions.length,
-          sampleLines: lines.slice(0, 10),
-        },
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   } catch (error) {
+    console.error('Error processing PDF:', error);
     return new Response(
-      JSON.stringify({ 
-        success: false, 
-        error: error instanceof Error ? error.message : String(error), 
-        data: [] 
+      JSON.stringify({
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        data: [],
+        headers: []
       }),
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
 });
 
-function extractTextFromPDF(arrayBuffer: ArrayBuffer): string {
-  const uint8Array = new Uint8Array(arrayBuffer);
-  const textParts: string[] = [];
+async function extractTextFromPDF(data: Uint8Array): Promise<string> {
+  try {
+    const pdf = await pdfjsLib.getDocument({ data }).promise;
+    const textParts: string[] = [];
 
-  const utf8Decoder = new TextDecoder("utf-8", { fatal: false });
-  let decodedPDF = utf8Decoder.decode(uint8Array);
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+      const page = await pdf.getPage(pageNum);
+      const textContent = await page.getTextContent();
 
-  textParts.push(extractFromStreams(decodedPDF));
-  textParts.push(extractFromParentheses(decodedPDF));
-  textParts.push(extractFromBinaryData(uint8Array));
+      const pageText = textContent.items
+        .map((item: any) => item.str)
+        .join(' ');
 
-  const combined = textParts.join(" ").trim();
-  const cleaned = combined
-    .replace(/\s+/g, " ")
-    .replace(/[^\x20-\x7E\n\r\t]/g, " ")
-    .trim();
-
-  return cleaned;
-}
-
-function extractFromStreams(decodedPDF: string): string {
-  const result: string[] = [];
-  const parts = decodedPDF.split("stream");
-
-  for (let i = 1; i < parts.length && i < 500; i++) {
-    const idx = parts[i].indexOf("endstream");
-    if (idx > 0) {
-      const data = parts[i].substring(0, idx);
-      const cleaned = data.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F]/g, " ");
-      if (cleaned.trim().length > 0) {
-        result.push(cleaned.trim());
-      }
-    }
-  }
-
-  return result.join(" ");
-}
-
-function extractFromParentheses(decodedPDF: string): string {
-  const result: string[] = [];
-  let startIdx = 0;
-  let count = 0;
-
-  while (count < 2000) {
-    const idx = decodedPDF.indexOf("(", startIdx);
-    if (idx === -1) break;
-
-    const endIdx = decodedPDF.indexOf(")", idx);
-    if (endIdx === -1) break;
-
-    const len = endIdx - idx - 1;
-    if (len > 2 && len < 500) {
-      let content = decodedPDF.substring(idx + 1, endIdx);
-      content = content.replace(/\\\(/g, "(").replace(/\\\)/g, ")");
-      content = content.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F]/g, " ");
-      if (content.trim().length > 0) {
-        result.push(content.trim());
-      }
+      textParts.push(pageText);
     }
 
-    startIdx = endIdx + 1;
-    count++;
+    return textParts.join('\n');
+  } catch (error) {
+    console.error('PDF extraction error:', error);
+    throw new Error('Failed to extract text from PDF');
   }
-
-  return result.join(" ");
 }
 
-function extractFromBinaryData(uint8Array: Uint8Array): string {
-  const result: string[] = [];
-  let current = "";
+interface ParseResult {
+  data: Array<{ [key: string]: string }>;
+  headers: string[];
+}
 
-  for (let i = 0; i < uint8Array.length; i++) {
-    const byte = uint8Array[i];
-    if (byte >= 32 && byte <= 126) {
-      current += String.fromCharCode(byte);
+function parseTabularData(text: string): ParseResult {
+  const lines = text.split(/\n+/).map(l => l.trim()).filter(l => l.length > 0);
+
+  let headers: string[] = [];
+  let dataLines: string[] = [];
+  let inDataSection = false;
+  let footerStartIndex = -1;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (!inDataSection) {
+      if (isHeaderLine(line)) {
+        headers = extractHeaders(line);
+        inDataSection = true;
+        continue;
+      }
     } else {
-      if (current.length > 3) {
-        result.push(current);
+      if (isFooterLine(line)) {
+        footerStartIndex = i;
+        break;
       }
-      current = "";
+
+      if (isValidDataLine(line, headers)) {
+        dataLines.push(line);
+      }
     }
   }
 
-  if (current.length > 3) {
-    result.push(current);
+  if (headers.length === 0) {
+    headers = detectHeadersFromContent(lines);
   }
 
-  return result.join(" ");
+  const transactions = dataLines.map(line => parseDataLine(line, headers));
+
+  return {
+    data: transactions.filter(t => Object.values(t).some(v => v && v.length > 0)),
+    headers: headers
+  };
 }
 
-function parseTransactions(text: string): Array<any> {
-  const lines = text
-    .split(/[\n\r]+/)
-    .map(l => l.trim())
-    .filter(l => l.length > 5);
+function isHeaderLine(line: string): boolean {
+  const lowerLine = line.toLowerCase();
 
-  const transactions: Array<any> = [];
-  const seen = new Set<string>();
-
-  for (const line of lines) {
-    if (seen.has(line.substring(0, 100))) continue;
-    seen.add(line.substring(0, 100));
-
-    const date = extractDate(line);
-    if (!date) continue;
-
-    const amounts = extractAmounts(line);
-    if (amounts.length === 0) continue;
-
-    let description = line
-      .replace(date, "")
-      .replace(/[0-9.,\s]+/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    if (!description || description.length < 2) {
-      description = "Transaction";
-    }
-
-    transactions.push({
-      date: date,
-      particulars: description.substring(0, 150),
-      withdrawal: "",
-      deposit: "",
-      balance: amounts[amounts.length - 1] || "",
-    });
-  }
-
-  return transactions.slice(0, 1000);
-}
-
-function extractDate(line: string): string {
-  const patterns = [
-    /(\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4})/,
-    /(\d{4}[-\/]\d{1,2}[-\/]\d{1,2})/,
-    /(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{2,4})/i,
-    /(\d{2}-\d{2}-\d{4})/,
+  const headerPatterns = [
+    /date|transaction|debit|credit|description|particulars|amount|balance/i,
   ];
 
-  for (const p of patterns) {
-    const m = line.match(p);
-    if (m) return m[0];
-  }
-
-  return "";
-}
-
-function extractAmounts(line: string): string[] {
-  const amounts = new Set<string>();
-  const patterns = [
-    /\d{1,3}(?:,\d{3})*\.\d{1,2}/g,
-    /\d+\.\d{2}/g,
-    /\d{1,3}(?:,\d{3})+/g,
+  const headerIndicators = [
+    'date',
+    'transaction',
+    'debit',
+    'credit',
+    'balance',
+    'amount',
+    'description',
+    'particulars',
+    'withdrawal',
+    'deposit',
+    'opening',
+    'closing',
+    'reference',
   ];
 
-  for (const p of patterns) {
-    const m = line.match(p);
-    if (m) {
-      m.forEach(amt => amounts.add(amt));
+  const matches = headerIndicators.filter(indicator =>
+    lowerLine.includes(indicator)
+  );
+
+  return matches.length >= 2 && !line.match(/\d{2,4}[-\/]\d{1,2}[-\/]\d{1,2}/);
+}
+
+function extractHeaders(line: string): string[] {
+  const headers = line
+    .split(/\s{2,}/)
+    .map(h => h.trim())
+    .filter(h => h.length > 0 && !h.match(/^\d+$/));
+
+  if (headers.length === 0) {
+    const parts = line.split(/\t+/).map(p => p.trim()).filter(p => p.length > 0);
+    return parts;
+  }
+
+  return headers;
+}
+
+function isFooterLine(line: string): boolean {
+  const lowerLine = line.toLowerCase();
+
+  const footerPatterns = [
+    /^(end of statement|total|grand total|closing balance|statement generated|thank you)/i,
+    /^page \d+ of \d+/i,
+    /bank name|branch|ifsc|micr/i,
+    /^(this is a|please note|for further|thank|regards|signature|terms)/i,
+  ];
+
+  return footerPatterns.some(pattern => pattern.test(lowerLine));
+}
+
+function isValidDataLine(line: string, headers: string[]): boolean {
+  if (line.length < 5) return false;
+
+  const hasDate = /\d{1,2}[-\/]\d{1,2}[-\/]\d{2,4}|\d{2}[\s-]\w{3}[\s-]\d{4}/.test(line);
+  const hasAmount = /\d+(?:[.,]\d{2})?(?:\s|$)/.test(line);
+
+  return hasDate || (hasAmount && line.split(/\s+/).length >= 3);
+}
+
+function detectHeadersFromContent(lines: string[]): string[] {
+  for (let i = 0; i < Math.min(10, lines.length); i++) {
+    const line = lines[i];
+    if (isHeaderLine(line)) {
+      return extractHeaders(line);
     }
   }
 
-  return Array.from(amounts);
+  return ['Date', 'Description', 'Amount', 'Balance'];
+}
+
+function parseDataLine(line: string, headers: string[]): { [key: string]: string } {
+  const parts = line
+    .split(/\s{2,}/)
+    .map(p => p.trim())
+    .filter(p => p.length > 0);
+
+  if (parts.length === 0) {
+    const tabParts = line.split(/\t+/).map(p => p.trim()).filter(p => p.length > 0);
+    return mapPartsToHeaders(tabParts, headers);
+  }
+
+  return mapPartsToHeaders(parts, headers);
+}
+
+function mapPartsToHeaders(parts: string[], headers: string[]): { [key: string]: string } {
+  const result: { [key: string]: string } = {};
+
+  headers.forEach((header, index) => {
+    result[header] = parts[index] || '';
+  });
+
+  return result;
 }
