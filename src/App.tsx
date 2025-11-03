@@ -12,6 +12,7 @@ interface SavedSession {
   pages: PageData[];
   headers: string[];
   filename: string;
+  columnTypes?: { [key: string]: string };
 }
 
 function App() {
@@ -19,6 +20,7 @@ function App() {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [pages, setPages] = useState<PageData[]>([]);
   const [headers, setHeaders] = useState<string[]>([]);
+  const [columnTypes, setColumnTypes] = useState<{ [key: string]: string }>({});
   const [filename, setFilename] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -31,6 +33,7 @@ function App() {
         setTransactions(session.transactions);
         setPages(session.pages || []);
         setHeaders(session.headers);
+        setColumnTypes(session.columnTypes || {});
         setFilename(session.filename);
       } catch (e) {
         console.error('Error loading saved session:', e);
@@ -53,6 +56,7 @@ function App() {
     setTransactions([]);
     setPages([]);
     setHeaders([]);
+    setColumnTypes({});
 
     try {
       const result = await processPDF(selectedFile);
@@ -61,12 +65,14 @@ function App() {
         setTransactions(result.data);
         setPages(result.pages || []);
         setHeaders(result.headers || []);
+        setColumnTypes(result.columnTypes || {});
         setFilename(result.filename);
 
         const session: SavedSession = {
           transactions: result.data,
           pages: result.pages || [],
           headers: result.headers || [],
+          columnTypes: result.columnTypes || {},
           filename: result.filename,
         };
         localStorage.setItem('pdfConversionSession', JSON.stringify(session));
@@ -91,6 +97,7 @@ function App() {
       transactions: newData,
       pages: newPages,
       headers: headers,
+      columnTypes: columnTypes,
       filename: filename,
     };
     localStorage.setItem('pdfConversionSession', JSON.stringify(session));
@@ -130,6 +137,7 @@ function App() {
               filename={filename}
               onDataChange={handleDataChange}
               headers={headers}
+              columnTypes={columnTypes}
             />
           </div>
         )}

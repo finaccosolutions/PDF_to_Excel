@@ -13,5 +13,6 @@ export interface ConversionResult {
   pages: PageData[];
   filename: string;
   headers: string[];
+  columnTypes?: { [key: string]: string };
   error?: string;
 }
